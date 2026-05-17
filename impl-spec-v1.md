@@ -105,7 +105,7 @@ make this a thin build:
 [dependencies]
 bevy = { version = "0.18", default-features = false, features = [
     "ui",            # bevy_ui + the renderer pieces UI needs
-    "bevy_ui_widgets",   # standard widgets (buttons, sliders, text input)
+    "experimental_bevy_ui_widgets",   # standard widgets (buttons, sliders, text input)
     "bevy_window",
     "bevy_winit",
     "x11", "wayland", # or platform-appropriate windowing backends
