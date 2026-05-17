@@ -184,12 +184,12 @@ struct Cell {
 
 enum CellContent {
     Value(LeafValue),                 // the T case
-    Grid(Grid),                       // the Grid case; may be empty
+    Grid(Grid),                       // a non-empty grid of Cells
+    Empty,                            // the cell holds nothing
 }
 ```
 
-This is the design's `T | Grid` (design §4.2) verbatim. **`Cell` has no `type`
-field** — see §4.4; the absence is deliberate and load-bearing.
+The design's T | Grid becomes T | Grid | Empty. Empty is a genuine third state, not an encoding trick: it is the content of a Cell holding nothing yet — an empty Tree<T>, or a non-tree field in its unfilled initial state (§4.3). Making emptiness explicit also lets Cell derive Default (Empty is that default), which is what lets an operation mem::take a Cell out of a slot and leave a well-formed Empty behind. Because emptiness has its own state, a Grid is only ever constructed non-empty — an empty tree is Empty, never a zero-sized grid. Cell has no type field — see §4.4; the absence is deliberate and load-bearing.
 
 The grid is a genuine 2D **rectangular matrix** of Cells:
 
@@ -204,9 +204,7 @@ struct Grid {
 **Invariant: `cells.len() == width * height`.** A grid is always rectangular
 `width × height`; cell `(r, c)` is `cells[r * width + c]`. Raggedness — rows of
 differing length — is **unrepresentable by construction**, in the same spirit
-as `Tree<Tree<T>>` being unexpressible (§4.1). An *empty* tree is
-`width == 0, height == 0, cells == []` — "empty" is not a third state (design
-§4.2).
+as `Tree<Tree<T>>` being unexpressible (§4.1). An empty tree is the Empty content state, not a zero-sized grid; a Grid always describes real layout. The cells.len() == width * height invariant stands.
 
 Rectangularity is preserved *by the operations themselves*: the only breadth
 operations (design §7.2, this doc §6) add or remove **whole rows** and **whole
@@ -229,18 +227,19 @@ enum LeafValue {
 
 struct StructInstance {
     struct_id: StructId,
-    variant: usize,                   // index into StructDef::variants
-    fields: Vec<Cell>,                // one Cell per field of that variant
+    variant: Option<usize>,           // index into StructDef::variants; None until the user picks
+    fields: Vec<Cell>,                // one Cell per field of the chosen variant
 }
 ```
+
+variant is Option because a Struct can exist before a variant is chosen — notably every Struct in the Rom palette (§5.1). A None variant is a legitimate in-progress state in Rom and Ram; it is not acceptable in Rim, and validate (§8.2) rejects a move that would carry one there.
 
 A field of a variant is always stored as a `Cell` — uniformly, whether the
 field's type is `T` or `Tree<T>`. The `is_tree` flag does not change the
 *storage*; it changes only what the **validator** (§8) accepts:
 
-- `is_tree == false` → the field's Cell content must be `Value`.
-- `is_tree == true`  → the field's Cell is the root of a `Tree<T>`; its content
-  may be `Value` or `Grid`, any shape.
+- is_tree == false → the field's Cell content is Value (filled) or Empty (the unfilled initial state, and the state it returns to when cleared). Never Grid.
+- is_tree == true → the field's Cell is the root of a Tree<T>; its content may be Value, Grid, or Empty (the empty tree), any shape.
 
 **There are two recursions in this model, on different axes, and they must not
 be conflated:**
@@ -303,10 +302,13 @@ fn flatten<'a>(cell: &'a Cell, out: &mut Vec<&'a LeafValue>) {
         CellContent::Value(v) => out.push(v),
         CellContent::Grid(g) => {
             for c in &g.cells { flatten(c, out); }   // cells are row-major
-        }
+        },
+        CellContent::Empty => {},        // an empty cell contributes no element
     }
 }
 ```
+
+An Empty cell adds nothing to the flattened sequence — emptiness has no semantic content. (Knock-on for canvas export, §4.7: an unfilled non-tree field has no value to emit — decide whether export omits the field or emits null.)
 
 This is the design §4.4 flatten invariant in code: the flattened sequence is
 the **semantic** identity; the tree shape is **storage/layout** identity only.
@@ -329,6 +331,8 @@ from `schema` on load (design §5.1, §9). Binary is the primary format because
 it is compact and round-trips the *exact tree shape*, which the editor needs to
 redraw the canvas faithfully (design §4.4 — the tree is the storage source of
 truth).
+
+§4.7a Load-time integrity check. Deserialization reconstructs the document's shape but not the validity of its indices — a StructId, a StructInstance::variant, or a TypeRef::Struct(id) can be out of range in a corrupted, hand-edited, or version-mismatched file, and a Grid can arrive with cells.len() != width * height. Load is therefore two steps: deserialize, then run check_integrity(&Document) -> Result<(), IntegrityError>, which walks the schema and all three regions and confirms every StructId indexes Schema::structs, every Some(variant) indexes its StructDef::variants, every StructInstance::fields has the arity its variant declares, and every Grid satisfies §4.2's invariant. A file that fails is rejected with a user-facing error and never becomes a live Document. This is the single point that earns the hot path its trust: validate (§8.2), resolve_field_def, and the operations all index Schema and variants directly, because any Document that exists has already passed check_integrity. The same check (or a targeted re-validation) must also run after any in-app schema edit (design §10.3) — the other way a live document's indices could be invalidated.
 
 **Full JSON export — optional.** A feature-gated action serializes the same
 full document structure to human-readable JSON via `serde_json`. This is a
@@ -364,8 +368,10 @@ unchanged — only the leaf seam differs.
 
 ### 5.1 Region resources
 
-Each region is a grid of Cells, equivalently a single Cell whose content is a
-`Grid` (design §5). The whole document is one resource:
+Region Rom is a grid of cells. Region Ram start of as an empty cell, but is essentially a
+grid of cells. Region Rim starts as an empty cell to, but represents a single field.
+
+The whole document is one resource:
 
 ```rust
 #[derive(Resource)]
@@ -384,9 +390,9 @@ moves — which touch two regions and the selection at once — a single
 borrow.
 
 `rom` is initialized once from `schema`: one Cell per defined Struct (a
-`Value(Struct(default instance))`), one Cell for `Symbol`
+`Value(Struct(variant: None))`), one Cell for `Symbol`
 (`Value(Symbol(String::new()))`), and one **bare Tree** — a Cell with
-`content: Grid(empty)` (design §5.1). The bare Tree is *not* typed and does not
+`content: Empty` (design §5.1). The bare Tree is *not* typed and does not
 become typed when placed; it is simply a Cell that later sits in a typed field,
 which is where the type comes from (design §6 — no conversion event).
 
@@ -474,7 +480,7 @@ Depth changes are emergent:
   `move self` back; or `move contents` to flatten.
 - **Depth increase** — `move self` on a region's *root* Cell. There is no
   parent to move within, so the only coherent effect is: the root Cell leaves,
-  and a **fresh empty root Cell** (`content: Grid(empty)`) is created in its
+  and a **fresh empty root Cell** (`content: Empty`) is created in its
   place. In code this is a special case in `apply` keyed on
   `loc.path.is_empty()`. This behavior is intended and **manual-worthy**
   (design §7.3) — implement it deliberately, do not "fix" it.
@@ -630,14 +636,12 @@ fn validate(cell: &Cell, field: &FieldDef, schema: &Schema)
             Ok(())
         }
         CellContent::Value(_) => validate_as_elem(cell, &field.elem, schema),
+        CellContent::Empty => Ok(()),   // empty cell — valid in tree and non-tree fields alike (§4.3)
     }
 }
 ```
 
-`validate_as_elem` checks one leaf against a `TypeRef`: `Symbol` accepts any
-string; `Struct(id)` requires a `StructInstance` with matching `struct_id`, an
-in-range `variant`, and — recursing the *field* axis — every field Cell valid
-against its own `FieldDef`.
+validate_as_elem checks one leaf against a TypeRef: Symbol accepts any string; Struct(id) requires a StructInstance with matching struct_id, a variant that has been chosen (Some — a move carrying a None-variant struct into Rim is rejected), and — recursing the field axis — every field Cell valid against its own FieldDef. The variant index itself is assumed in range: document integrity is established once at load (§4.7a), so the move hot path indexes variants directly instead of re-checking on every drop.
 
 The check inspects **values**, never Cell-types — there are no Cell-types to
 inspect (§4.4). A homogeneous tree matching the target passes; a heterogeneous
