@@ -1,0 +1,22 @@
+[package]
+name = "rudra"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bevy = { version = "0.18", default-features = false, features = [
+    "ui",            # bevy_ui + the renderer pieces UI needs
+    "experimental_bevy_ui_widgets",   # standard widgets (buttons, sliders, text input)
+    "bevy_window",
+    "bevy_winit",
+    "x11", "wayland", # or platform-appropriate windowing backends
+] }
+
+
+# Modest opt-level for our crate keeps debug builds responsive;
+# `package."*" = 3` keeps dependencies (like Bevy) fast.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
