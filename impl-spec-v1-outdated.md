@@ -368,8 +368,8 @@ unchanged — only the leaf seam differs.
 
 ### 5.1 Region resources
 
-Region Rom is a grid of cells. Region Ram start of as an empty cell, but is essentially a
-grid of cells. Region Rim starts as an empty cell to, but represents a single field.
+Region Rom is a grid of cells. Region Ram start off as an empty cell, but is essentially a
+grid of cells. Region Rim starts as an empty cell too, but represents a single field.
 
 The whole document is one resource:
 
@@ -377,6 +377,7 @@ The whole document is one resource:
 #[derive(Resource)]
 struct Document {
     schema: Schema,
+    rim_root_field: FieldDef,  
     rom: Cell,                        // content is always Grid
     ram: Cell,                        // content is always Grid
     rim: Cell,                        // content is always Grid
@@ -395,6 +396,13 @@ borrow.
 `content: Empty` (design §5.1). The bare Tree is *not* typed and does not
 become typed when placed; it is simply a Cell that later sits in a typed field,
 which is where the type comes from (design §6 — no conversion event).
+
+#### 5.1a The Rim root field
+Rim is the typed canvas: §8.2 requires every Cell placed in Rim to be checked against a type. For a Cell in a struct's field that type is right there — the FieldDef in the schema (§4.1). But the Rim root Cell sits in no struct, so there is no FieldDef to check it against, and a move into the Rim root (an empty to path) has nothing to validate against — it silently bypasses §8.2.
+The fix introduces no new typing mechanism, and must not: §4.4 stands — a Cell carries no type. What types the Rim root Cell is a field, the root field, exactly as a FieldDef types every other Cell. The only thing unusual is where it is stored: on the Document, not inside a StructInstance.
+Document therefore carries rim_root_field: FieldDef, and rim is understood as its Cell — doc.rim relates to rim_root_field exactly as StructInstance::fields[i] relates to variant_def.fields[i]. It is an ordinary FieldDef: elem is the canvas's element type, is_tree decides whether the canvas is a single value or a Tree<T>, and name is unused by validation (it may hold the document label or be empty).
+Only Rim has a root field. Rom is the palette and is never a move destination; Ram is Tree<Any> and is never validated (§8.1). So "typing is a property of fields" (§4.4) now holds for every Cell in Rim, root included — Rim has no untyped location.
+rim_root_field is established at document creation, alongside schema. Unlike rom — which is omitted from DocumentSnapshot and rebuilt from schema (§6.1) — the root field is not derivable from anything, so it is captured by DocumentSnapshot, for the same reason schema is: a future in-app type editor (design §10.3) changing the canvas type stays undoable. The §4.7a integrity check must also confirm that rim_root_field.elem, if TypeRef::Struct(id), indexes Schema::structs.
 
 ### 5.2 Rebuilding the view from the document
 
@@ -473,6 +481,26 @@ open):
 - **move self / copy self** — act on the whole subtree rooted at the Cell.
 - **move contents / copy contents** — act on the Cell's `CellContent`.
 
+The two ends of a move. Every move chooses independently at each end. The
+source axis — self vs contents — selects the payload (the whole Cell, or
+its CellContent). The destination axis — replace vs nest — selects
+where the payload lands: replace makes the payload become the destination
+Cell; nest makes it a child element of the destination tree (an Empty
+destination becomes a 1×1 Grid holding the payload).
+
+nest keeps the destination Cell and sets that tree's contents to the
+payload: the old grid is discarded and replaced wholesale (a Value or
+Empty payload is wrapped 1×1; a Grid payload is taken as-is — so nest
+always yields a Grid, never a bare Empty). nest is not a growth
+operation and is not restricted by the destination's current population;
+growing a tree by adding to its contents is the whole-row/column operations
+(§7.2). A nest destination must be a tree, or an Empty cell whose
+governing FieldDef permits a tree — in the latter case the Empty cell
+becomes a tree, exercising the is_tree permission of §4.3. nest into a
+Value is forbidden (use replace to re-tree it); nest into an Empty
+cell of a non-tree field is forbidden. Tree permission is read from the
+governing field (§8.1), never from the cell's current content.
+
 There is **no within/without verb** (design §7.3) and none should be added.
 Depth changes are emergent:
 
@@ -542,15 +570,16 @@ Two refinements, deferred but worth noting:
 `apply` dispatches cross-region moves through one function implementing the
 design §8 table:
 
-| From → To   | Implementation                                                            |
-|-------------|---------------------------------------------------------------------------|
-| Rom → Ram   | `cell.clone()` into Ram. Infallible. Rom is never mutated.                 |
-| Rom → Rim   | Rejected before any work — must route via Ram.                            |
-| within Rom  | Rejected — no copy, no move.                                              |
-| within Ram  | Move or clone between Ram cells. Infallible. Multi-select duplicates.      |
-| Rim → Ram   | Move the Cell into Ram. Infallible.                                       |
-| Ram → Rim   | **Fallible** — validate (§8), then place. See below.                      |
-| within Rim  | No direct op — round-trip via Ram (design §8.1).                          |
+| From → To  | Source semantics         | Validated?                                       |
+| ---------- | ------------------------ | ------------------------------------------------ |
+| Rom → Ram  | copy (Rom never mutated) | iff the Ram destination is inside a struct field |
+| within Ram | move or copy             | iff the destination is inside a struct field     |
+| Rim → Ram  | move                     | iff the Ram destination is inside a struct field |
+| Ram → Rim  | move                     | always (Rim is fully typed, §5.1a)               |
+| Rom → Rim  | —                        | forbidden (route via Ram)                        |
+| within Rom | —                        | forbidden                                        |
+| within Rim | —                        | no direct op (round-trip via Ram)                |
+
 
 Two derived behaviors:
 
@@ -561,23 +590,14 @@ Two derived behaviors:
   (using Ram multi-select to duplicate, for copy) `→ Rim`. The intermediate is
   **Ram**, never Rom.
 
-### 7.1 The fallible move
+### 7.1 The validated move
 
-`Ram → Rim` is the **only** move that can fail. The destination is a specific
-typed Rim field; the candidate is the Ram Cell:
-
-```rust
-fn move_ram_to_rim(doc: &mut Document, from: &CellLocation, to: &CellLocation)
-    -> Result<(), MoveError>
-{
-    let dest_field = resolve_field_def(&doc.schema, &doc.rim, to)?;
-    let candidate  = resolve_cell(&doc.ram, from)?;
-    validate(candidate, dest_field, &doc.schema)
-        .map_err(MoveError::Validation)?;
-    // only on success: detach from Ram, attach at `to`
-    ...
-}
-```
+Fallibility is a property of the destination cell, not of a region pair.
+Every move resolves its destination's governing FieldDef (the nearest Field
+step above it; §8.2) and validates the shaped payload against it. A destination
+with no governing field — a cell on the pure grid axis of the Ram root tree —
+is the only infallible case. Ram → Rim is not special: it is simply the move
+whose destination is always governed, because Rim is fully typed (§5.1a).
 
 Failure carries the offending leaf's path so the UI can reject the drop and
 highlight it (design §8.3):
@@ -604,9 +624,13 @@ Design §6.2 is emphatic and this implementation honors it literally:
 
 - There is **no `TypeRef::Any` variant.**
 - There is **no `Any` value, no `Cell::ty`, nothing that "becomes `Any`."**
-- `Any` is the *name for the absence of a `validate()` call.* "A tree in Ram is
-  `Tree<Any>`" means exactly: **Ram code paths never call `validate`.** Nothing
-  more.
+- `Any` is the name for the absence of a governing `FieldDef` — and thus
+the absence of a `validate()` call. It is per-destination, not
+per-region. "A tree in Ram is `Tree<Any>`" means only that the Ram root
+tree imposes no element type. A struct anywhere — Ram included — has typed
+fields (§4.4: typing lives on `FieldDef`, in the schema), so a move into a
+struct field is validated regardless of region. The untyped root tree is the
+one place no check runs.
 
 > **Rejected alternatives — do not reintroduce (each rebuilds a design §6
 > contradiction):**
@@ -621,7 +645,8 @@ Design §6.2 is emphatic and this implementation honors it literally:
 
 ### 8.2 The structural tree-walk
 
-Validation runs **only** on entry into a typed Rim field (design §6.4, §8.3).
+"Validation runs on entry into any typed field — every cell that has a governing FieldDef
+(§8.1), in Rim or in a Ram struct."
 It is a structural walk of the candidate — root and every grid-axis child —
 confirming every leaf is a valid `T` for the destination's element type:
 
