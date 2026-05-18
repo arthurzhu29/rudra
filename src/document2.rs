@@ -265,7 +265,7 @@ impl Cell {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Types(Vec<StructDef>);
+pub struct Types(pub Vec<StructDef>);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StructDef {
