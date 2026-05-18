@@ -5,12 +5,15 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.18", default-features = false, features = [
-    "ui",            # bevy_ui + the renderer pieces UI needs
-    "experimental_bevy_ui_widgets",   # standard widgets (buttons, sliders, text input)
+    "ui",                            # bevy_ui + the renderer pieces UI needs
+    "experimental_bevy_ui_widgets",  # the standard widget set — see note below
     "bevy_window",
     "bevy_winit",
-    "x11", "wayland", # or platform-appropriate windowing backends
+    "x11", "wayland",                # platform windowing backends
 ] }
+serde = { version = "1", features = ["derive"] }
+bincode = "2"                        # binary save format (§9.5)
+serde_json = "1"                     # JSON export (§9.5)
 
 
 # Modest opt-level for our crate keeps debug builds responsive;
