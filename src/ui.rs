@@ -1,29 +1,16 @@
-//! Rudra - Bevy UI layer (MVP).
+//! Rudra - Bevy UI layer.
 //!
-//! Architecture: the `Document` (in `crate::document2`) is the single source of
-//! truth. This module is the *view*. It never holds derived state about the
-//! document; whenever the document or the selection changes it sets a `Dirty`
-//! flag, and `rebuild_view` throws the whole view away and respawns it from the
-//! document. That "whole-view rebuild" is the deliberately simple approach - an
-//! MVP does not need incremental diffing.
+//! The `Document` (in `crate::document2`) is the single source of truth; this
+//! module is the *view* and holds no derived document state. On any change a
+//! `Dirty` flag is set, and `rebuild_view` discards the whole view and respawns
+//! it from the document - the deliberately simple whole-view-rebuild approach.
 //!
-//! ---------------------------------------------------------------------------
-//! NOTE ON THE BEVY API. This targets Bevy 0.18, but the exact API surface here
-//! is *not* compile-verified - the logic and structure are what matter. The
-//! spots most likely to need a name/shape fix for your Bevy version:
-//!   * the observer event wrapper - `Trigger<E>` vs `On<E>`;
-//!   * `Trigger::target()` (may be `.entity()`) and `Trigger::propagate(bool)`;
-//!   * the `with_children` closure parameter type (`ChildBuilder` vs
-//!     `ChildSpawnerCommands` / `RelatedSpawnerCommands`);
-//!   * `Text` / `TextFont` / `TextColor`, `Camera2d`, `Color::srgb`;
-//!   * `KeyboardInput` / `Key` field names in `symbol_typing`;
-//!   * whether `DefaultPlugins` under the crate's feature set pulls everything
-//!     a windowed UI app needs.
-//! Fix those names; the wiring, the data flow, and the recursion below should
-//! otherwise hold as-is.
-//! ---------------------------------------------------------------------------
+//! Selection (the focused cell, copy mode) is view-only state in the `Ui`
+//! resource and is baked into each cell's colours when the view is rebuilt.
+//! Hovering is separate: per-cell `Over`/`Out` observers swap a cell's
+//! background to its hover colour and back, with `propagate(false)` keeping a
+//! hover confined to the innermost cell under the pointer.
 
-use bevy::ecs::relationship::RelatedSpawnerCommands;
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
@@ -54,37 +41,7 @@ pub fn run() {
         .add_systems(Startup, setup)
         // typing edits run before the rebuild so an edit shows the same frame
         .add_systems(Update, (symbol_typing, rebuild_view).chain())
-        .add_systems(Update, hover_system)
         .run();
-}
-
-#[derive(Component)]
-struct Depth(u32);
-
-fn hover_system(mut query: Query<(&mut BorderColor, &mut BackgroundColor, &Interaction, Entity, &Depth)>) {
-    let mut hovered = None;
-    let mut current_depth = 0;
-    for (_, mut bg, i, e, d) in &mut query {
-        match i {
-            Interaction::Hovered => {
-                if d.0 >= current_depth {
-                    current_depth = d.0;
-                    hovered = Some(e);
-                }
-            },
-            Interaction::None => {},
-            _ => {}
-        }
-    }
-    for (mut border, mut bg, i, e, d) in &mut query {
-        *bg = BackgroundColor(Color::BLACK);
-        *border = BorderColor::all(Color::WHITE);
-    }
-    if let Some(e) = hovered {
-        let (mut border, mut bg, ..) = query.get_mut(e).unwrap();
-        *bg = BackgroundColor(Color::WHITE);
-        *border = BorderColor::all(Color::BLACK);
-    }
 }
 
 /// A small sample schema so the MVP shows something interesting: one struct
@@ -178,6 +135,16 @@ struct CellTag(CellLocation);
 #[derive(Component)]
 struct ButtonTag(Action);
 
+/// An entity whose background swaps between two colours on pointer hover.
+/// Carried by every cell and every toolbar button. `rest` is the colour the
+/// view was built with (it already reflects selection state); `hover` is shown
+/// while the pointer is directly over the entity.
+#[derive(Component)]
+struct Hoverable {
+    rest: Color,
+    hover: Color,
+}
+
 #[derive(Clone, Copy)]
 enum Action {
     Copy,
@@ -235,34 +202,20 @@ fn build_view(commands: &mut Commands, doc: &Document, types: &Types, ui: &Ui) {
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            BackgroundColor(Color::srgb(0.10, 0.10, 0.12)),
+            BackgroundColor(APP_BG),
         ))
         .with_children(|root| {
-                crate::spawn_section::my_setup(
-                    root,
-                    |cs| spawn_region(cs, Region::Rom, doc, types, ui),
-                    |cs| spawn_region(cs, Region::Ram, doc, types, ui),
-                    |cs| spawn_region(cs, Region::Rim, doc, types, ui),
-                    (
-                            Color::srgb(0.25, 0.2, 0.2),
-                            Color::srgb(0.2, 0.25, 0.2),
-                            Color::srgb(0.2, 0.2, 0.25),
-                        ),
-                );
-            // --- status line ---
-
-            // --- toolbar ---
+            // top to bottom: toolbar, status line, then the regions fill the rest
+            crate::spawn_section::spawn_columns(
+                root,
+                |cs| spawn_region(cs, Region::Rom, doc, types, ui),
+                |cs| spawn_region(cs, Region::Ram, doc, types, ui),
+                |cs| spawn_region(cs, Region::Rim, doc, types, ui),
+            );
             spawn_toolbar(root);
-            root.spawn((
-                Text::new(status_text(ui)),
-                TextFont { font_size: 14.0, ..default() },
-                TextColor(Color::srgb(0.85, 0.80, 0.55)),
-                Node { margin: UiRect::all(Val::Px(6.0)), ..default() },
-            ));
-
+            spawn_status(root, ui);
         });
 }
-
 
 fn spawn_toolbar(root: &mut ChildSpawnerCommands) {
     // Plain ASCII labels - the default Bevy font is not guaranteed to carry
@@ -280,14 +233,17 @@ fn spawn_toolbar(root: &mut ChildSpawnerCommands) {
         ("Variant +", Action::NextVariant),
     ];
 
-    root.spawn(Node {
-        flex_direction: FlexDirection::Row,
-        flex_wrap: FlexWrap::Wrap,
-        column_gap: Val::Px(4.0),
-        row_gap: Val::Px(4.0),
-        padding: UiRect::all(Val::Px(6.0)),
-        ..default()
-    })
+    root.spawn((
+        Node {
+            flex_direction: FlexDirection::Row,
+            flex_wrap: FlexWrap::Wrap,
+            column_gap: Val::Px(4.0),
+            row_gap: Val::Px(4.0),
+            padding: UiRect::all(Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(PANEL_BG),
+    ))
     .with_children(|bar| {
         for (label, action) in actions {
             bar.spawn((
@@ -296,17 +252,34 @@ fn spawn_toolbar(root: &mut ChildSpawnerCommands) {
                     padding: UiRect::axes(Val::Px(8.0), Val::Px(4.0)),
                     ..default()
                 },
-                BackgroundColor(Color::srgb(0.25, 0.25, 0.30)),
+                BackgroundColor(BUTTON_BG),
+                Hoverable { rest: BUTTON_BG, hover: lighten(BUTTON_BG, 0.22) },
             ))
             .with_children(|b| {
                 b.spawn((
                     Text::new(label),
                     TextFont { font_size: 13.0, ..default() },
-                    TextColor(Color::WHITE),
+                    TextColor(TEXT_FG),
                 ));
             })
-            .observe(on_button_click);
+            .observe(on_button_click)
+            .observe(observe_over)
+            .observe(observe_out);
         }
+    });
+}
+
+fn spawn_status(root: &mut ChildSpawnerCommands, ui: &Ui) {
+    root.spawn((
+        Node { padding: UiRect::all(Val::Px(6.0)), ..default() },
+        BackgroundColor(PANEL_BG),
+    ))
+    .with_children(|s| {
+        s.spawn((
+            Text::new(status_text(ui)),
+            TextFont { font_size: 13.0, ..default() },
+            TextColor(STATUS_FG),
+        ));
     });
 }
 
@@ -320,16 +293,16 @@ fn spawn_region(
     parent
         .spawn(Node {
             flex_direction: FlexDirection::Column,
+            width: Val::Percent(100.0),
             row_gap: Val::Px(6.0),
             padding: UiRect::all(Val::Px(8.0)),
             align_items: AlignItems::Start,
-            justify_content: JustifyContent::Start,
             ..default()
         })
         .with_children(|col| {
             // each region is one root Cell, rendered recursively
             let root_loc = CellLocation { region, path: vec![] };
-            spawn_cell(col, doc.root(region), &root_loc, types, ui, 0);
+            spawn_cell(col, doc.root(region), &root_loc, types, ui);
         });
 }
 
@@ -337,20 +310,22 @@ fn spawn_region(
 // The recursive cell renderer - the heart of the view
 // ===========================================================================
 
-const BORDER_SYMBOL: Color = Color::srgb(0.40, 0.40, 0.42);
-const BORDER_EMPTY: Color = Color::srgb(0.30, 0.30, 0.32);
-const BORDER_STRUCT: Color = Color::srgb(0.55, 0.45, 0.30);
-const BORDER_TREE: Color = Color::srgb(0.30, 0.50, 0.50);
-
 fn spawn_cell(
     parent: &mut ChildSpawnerCommands,
     cell: &Cell,
     loc: &CellLocation,
     types: &Types,
     ui: &Ui,
-    depth: u32,
 ) {
-    let (bg, border) = cell_background(loc, ui, cell);
+    let v = cell_visual(loc, ui, cell);
+
+    // shared by every cell variant: a tagged, coloured, hoverable box
+    let base = (
+        CellTag(loc.clone()),
+        BackgroundColor(v.rest_bg),
+        BorderColor::all(v.border),
+        Hoverable { rest: v.rest_bg, hover: v.hover_bg },
+    );
 
     match cell {
         // --- a symbol: an editable text box -------------------------------
@@ -358,26 +333,21 @@ fn spawn_cell(
             let shown = if s.is_empty() { "EMPTY".to_string() } else { s.clone() };
             parent
                 .spawn((
-                    CellTag(loc.clone()),
+                    base,
                     Node {
                         min_width: Val::Px(44.0),
                         min_height: Val::Px(28.0),
-                        // padding: UiRect::all(Val::Px(4.0)),
-                        border: UiRect::all(Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(CELL_BORDER)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         ..default()
                     },
-                    BackgroundColor(bg),
-                    border,
-                    Interaction::None,
-                    Depth(depth),
                 ))
                 .with_children(|c| {
                     c.spawn((
                         Text::new(shown),
                         TextFont { font_size: 14.0, ..default() },
-                        TextColor(Color::WHITE),
+                        TextColor(TEXT_FG),
                     ));
                 })
                 .observe(on_cell_click)
@@ -389,17 +359,13 @@ fn spawn_cell(
         Cell::Empty => {
             parent
                 .spawn((
-                    CellTag(loc.clone()),
+                    base,
                     Node {
                         min_width: Val::Px(44.0),
                         min_height: Val::Px(28.0),
-                        border: UiRect::all(Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(CELL_BORDER)),
                         ..default()
                     },
-                    BackgroundColor(bg),
-                    border,
-                    Interaction::None,
-                    Depth(depth),
                 ))
                 .observe(on_cell_click)
                 .observe(observe_over)
@@ -411,26 +377,22 @@ fn spawn_cell(
             let header = struct_header(sv, types);
             parent
                 .spawn((
-                    CellTag(loc.clone()),
+                    base,
                     Node {
                         flex_direction: FlexDirection::Column,
-                        border: UiRect::all(Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(CELL_BORDER)),
                         ..default()
                     },
-                    BackgroundColor(bg),
-                    border,
-                    Interaction::None,
-                    Depth(depth),
                 ))
                 .with_children(|c| {
                     c.spawn((
                         Text::new(header),
                         TextFont { font_size: 12.0, ..default() },
-                        TextColor(Color::srgb(0.90, 0.80, 0.60)),
+                        TextColor(HEADER_FG),
                     ));
                     for (i, field) in sv.fields.iter().enumerate() {
                         let field_loc = child(loc, PathStep::Struct(i));
-                        spawn_cell(c, field, &field_loc, types, ui, depth + 1);
+                        spawn_cell(c, field, &field_loc, types, ui);
                     }
                 })
                 .observe(on_cell_click)
@@ -442,16 +404,12 @@ fn spawn_cell(
         Cell::Tree(t) => {
             parent
                 .spawn((
-                    CellTag(loc.clone()),
+                    base,
                     Node {
                         flex_direction: FlexDirection::Column,
-                        border: UiRect::all(Val::Px(5.0)),
+                        border: UiRect::all(Val::Px(CELL_BORDER)),
                         ..default()
                     },
-                    BackgroundColor(bg),
-                    border,
-                    Interaction::None,
-                    Depth(depth),
                 ))
                 .with_children(|grid| {
                     // one flex row per grid row; cells are row-major in `contents`
@@ -465,7 +423,7 @@ fn spawn_cell(
                             for x in 0..t.width {
                                 let inner = &t.contents[y * t.width + x];
                                 let inner_loc = child(loc, PathStep::Tree(x, y));
-                                spawn_cell(row, inner, &inner_loc, types, ui, depth + 1);
+                                spawn_cell(row, inner, &inner_loc, types, ui);
                             }
                         });
                     }
@@ -477,48 +435,28 @@ fn spawn_cell(
     }
 }
 
-#[derive(Component)]
-struct Overy(BackgroundColor);
+// ===========================================================================
+// Hover (observers)
+// ===========================================================================
+//
+// `propagate(false)` confines the hover to the innermost cell under the
+// pointer: without it the same `Over` would bubble up the parent chain and
+// every enclosing cell would light up at once.
 
-fn observe_over(
-    e: On<Pointer<Over>>,
-    mut commands: Commands,
-    mut bg: Query<&mut BackgroundColor>,
-) {
-    let mut bg = bg.get_mut(e.entity).unwrap();
-    commands.entity(e.entity).insert(Overy(*bg));
-    //*bg = BackgroundColor(Color::srgb(0.4, 0.7, 1.0));
-    *bg = BackgroundColor(Color::WHITE);
-}
-
-fn observe_out(
-    e: On<Pointer<Out>>,
-    mut bg: Query<(&mut BackgroundColor, &Overy)>,
-    mut commands: Commands,
-) {
-    if let Ok((mut bg, Overy(colour))) = bg.get_mut(e.entity) {
-        *bg = *colour;
-        commands.entity(e.entity).remove::<Overy>();
+fn observe_over(mut over: On<Pointer<Over>>, mut q: Query<(&Hoverable, &mut BackgroundColor)>) {
+    over.propagate(false);
+    if let Ok((h, mut bg)) = q.get_mut(over.entity) {
+        *bg = BackgroundColor(h.hover);
     }
 }
 
-// fn hover_system(
-//     mut query: Query<(&Interaction, &mut BackgroundColor), Changed<Interaction>>,
-// ) {
-//     for (interaction, mut color) in &mut query {
-//         match *interaction {
-//             Interaction::Hovered => {
-//                 *color = BackgroundColor(Color::srgb(0.4, 0.7, 1.0));
-//             }
-//             Interaction::None => {
-//                 *color = BackgroundColor(Color::srgb(0.2, 0.2, 0.2));
-//             }
-//             Interaction::Pressed => {
-//                 *color = BackgroundColor(Color::srgb(0.1, 0.5, 0.9));
-//             }
-//         }
-//     }
-// }
+fn observe_out(mut out: On<Pointer<Out>>, mut q: Query<(&Hoverable, &mut BackgroundColor)>) {
+    out.propagate(false);
+    if let Ok((h, mut bg)) = q.get_mut(out.entity) {
+        // back to the resting colour - which already reflects selection state
+        *bg = BackgroundColor(h.rest);
+    }
+}
 
 // ===========================================================================
 // Click handlers (observers)
@@ -685,6 +623,98 @@ fn symbol_typing(
 }
 
 // ===========================================================================
+// Palette
+// ===========================================================================
+
+// app chrome
+const APP_BG: Color = Color::srgb(0.09, 0.09, 0.11);
+const PANEL_BG: Color = Color::srgb(0.13, 0.13, 0.16);
+const BUTTON_BG: Color = Color::srgb(0.22, 0.22, 0.28);
+
+// text
+const TEXT_FG: Color = Color::srgb(0.92, 0.92, 0.94);
+const HEADER_FG: Color = Color::srgb(0.90, 0.80, 0.60);
+const STATUS_FG: Color = Color::srgb(0.70, 0.72, 0.78);
+
+// cell backgrounds, by cell type (subtle, dark, distinguishable)
+const BG_SYMBOL: Color = Color::srgb(0.17, 0.19, 0.25);
+const BG_EMPTY: Color = Color::srgb(0.12, 0.12, 0.14);
+const BG_STRUCT: Color = Color::srgb(0.23, 0.19, 0.15);
+const BG_TREE: Color = Color::srgb(0.14, 0.21, 0.21);
+
+// cell borders, by cell type
+const BD_SYMBOL: Color = Color::srgb(0.36, 0.40, 0.52);
+const BD_EMPTY: Color = Color::srgb(0.26, 0.26, 0.30);
+const BD_STRUCT: Color = Color::srgb(0.52, 0.42, 0.30);
+const BD_TREE: Color = Color::srgb(0.30, 0.52, 0.52);
+
+// selection - shown on top of the per-type colours
+const FOCUS_BG: Color = Color::srgb(0.18, 0.30, 0.46);
+const FOCUS_BORDER: Color = Color::srgb(0.40, 0.66, 1.00);
+const COPY_DEST_BG: Color = Color::srgb(0.34, 0.24, 0.10);
+const COPY_DEST_BORDER: Color = Color::srgb(1.00, 0.66, 0.26);
+
+/// Cell border thickness, in px.
+const CELL_BORDER: f32 = 5.0;
+
+// ===========================================================================
+// Visuals
+// ===========================================================================
+
+/// The three colours a cell is drawn with.
+struct CellVisual {
+    rest_bg: Color,
+    hover_bg: Color,
+    border: Color,
+}
+
+/// Resolve a cell's colours from its type and the current selection state.
+/// Selection wins over the per-type colour; the hover colour is just the
+/// resting background, lightened.
+fn cell_visual(loc: &CellLocation, ui: &Ui, cell: &Cell) -> CellVisual {
+    let is_copy_dest = matches!(&ui.mode, Mode::AwaitingCopySource { dest } if dest == loc);
+    let is_focused = ui.focused.as_ref() == Some(loc);
+
+    let (rest_bg, border) = if is_copy_dest {
+        (COPY_DEST_BG, COPY_DEST_BORDER)
+    } else if is_focused {
+        (FOCUS_BG, FOCUS_BORDER)
+    } else {
+        (type_bg(cell), type_border(cell))
+    };
+
+    CellVisual { rest_bg, hover_bg: lighten(rest_bg, 0.18), border }
+}
+
+fn type_bg(cell: &Cell) -> Color {
+    match cell {
+        Cell::Symbol(_) => BG_SYMBOL,
+        Cell::Empty => BG_EMPTY,
+        Cell::Struct(_) => BG_STRUCT,
+        Cell::Tree(_) => BG_TREE,
+    }
+}
+
+fn type_border(cell: &Cell) -> Color {
+    match cell {
+        Cell::Symbol(_) => BD_SYMBOL,
+        Cell::Empty => BD_EMPTY,
+        Cell::Struct(_) => BD_STRUCT,
+        Cell::Tree(_) => BD_TREE,
+    }
+}
+
+/// Move a colour fraction `t` of the way towards white.
+fn lighten(c: Color, t: f32) -> Color {
+    let s = c.to_srgba();
+    Color::srgb(
+        s.red + (1.0 - s.red) * t,
+        s.green + (1.0 - s.green) * t,
+        s.blue + (1.0 - s.blue) * t,
+    )
+}
+
+// ===========================================================================
 // Small helpers
 // ===========================================================================
 
@@ -705,38 +735,6 @@ fn is_grid_cell(loc: &CellLocation) -> bool {
     matches!(loc.path.last(), Some(PathStep::Tree(_, _)))
 }
 
-/// The background tint for a rendered cell, given the current selection.
-fn cell_background(loc: &CellLocation, ui: &Ui, cell: &Cell) -> (Color, BorderColor) {
-    let bg = 'bg: {
-        if let Mode::AwaitingCopySource { dest } = &ui.mode {
-            if dest == loc {
-                break 'bg Color::srgb(0.45, 0.30, 0.12); // the pending copy destination
-            }
-        }
-        if ui.focused.as_ref() == Some(loc) {
-            break 'bg Color::srgb(0.20, 0.35, 0.55); // the focused cell
-        }
-        Color::srgb(0.16, 0.16, 0.18) // default
-    };
-    let border = 'border: {
-        if let Mode::AwaitingCopySource { dest } = &ui.mode {
-            if dest == loc {
-                break 'border BorderColor::all(Color::srgb(0.45, 0.30, 0.12)); // the pending copy destination
-            }
-        }
-        if ui.focused.as_ref() == Some(loc) {
-            break 'border BorderColor::all(Color::srgb(0.20, 0.35, 0.55)); // the focused cell
-        }
-        match cell {
-            Cell::Empty => BorderColor::all(BORDER_EMPTY),
-            Cell::Symbol(_) => BorderColor::all(BORDER_SYMBOL),
-            Cell::Struct(_) => BorderColor::all(BORDER_STRUCT),
-            Cell::Tree(_) => BorderColor::all(BORDER_TREE),
-        }
-    };
-    (bg, border)
-}
-
 /// e.g. `"Pair [xy]"` - struct name and the current variant's name.
 fn struct_header(sv: &StructVal, types: &Types) -> String {
     let def = &types.0[sv.id];
@@ -750,6 +748,14 @@ fn region_name(r: Region) -> &'static str {
         Region::Rom => "Rom - palette (read-only)",
         Region::Ram => "Ram - scratch",
         Region::Rim => "Rim - canvas",
+    }
+}
+
+fn region_color(r: Region) -> Color {
+    match r {
+        Region::Rom => Color::srgb(0.85, 0.55, 0.45),
+        Region::Ram => Color::srgb(0.55, 0.80, 0.55),
+        Region::Rim => Color::srgb(0.55, 0.70, 1.00),
     }
 }
 
