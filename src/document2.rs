@@ -1,6 +1,6 @@
 
 impl CellValue {
-    fn default(&self) -> Cell {
+    pub fn default(&self) -> Cell {
         match self {
             Self::Symbol => Cell::Symbol(String::new()),
             Self::Struct(n) => Cell::Struct(StructVal {
@@ -13,7 +13,7 @@ impl CellValue {
 }
 
 impl Document {
-    fn new(types: &[StructDef], rim_field: FieldDef) -> Self {
+    pub fn new(types: &[StructDef], rim_field: FieldDef) -> Self {
         let mut contents = Vec::new();
 
         for i in 0..types.len() {
@@ -64,7 +64,7 @@ impl Document {
         }
     }
 
-    fn root(&self, reg: Region) -> &Cell {
+    pub fn root(&self, reg: Region) -> &Cell {
         match reg {
             Region::Rim => &self.rim,
             Region::Ram => &self.ram,
@@ -72,7 +72,7 @@ impl Document {
         }
     }
 
-    fn root_mut(&mut self, reg: Region) -> &mut Cell {
+    pub fn root_mut(&mut self, reg: Region) -> &mut Cell {
         match reg {
             Region::Rim => &mut self.rim,
             Region::Ram => &mut self.ram,
@@ -80,7 +80,7 @@ impl Document {
         }
     }
 
-    fn resolve(&self, loc: &CellLocation) -> &Cell {
+    pub fn resolve(&self, loc: &CellLocation) -> &Cell {
         let mut current = self.root(loc.region);
 
         for step in &loc.path {
@@ -89,7 +89,7 @@ impl Document {
 
         current
     }
-    fn resolve_mut(&mut self, loc: &CellLocation) -> &mut Cell {
+    pub fn resolve_mut(&mut self, loc: &CellLocation) -> &mut Cell {
         let mut current = self.root_mut(loc.region);
 
         for step in &loc.path {
@@ -99,16 +99,16 @@ impl Document {
         current
     }
 
-    fn copy(&mut self, dest: &CellLocation, src: &CellLocation) {
+    pub fn copy(&mut self, dest: &CellLocation, src: &CellLocation) {
         *self.resolve_mut(dest) = self.resolve(src).clone();
     }
-    fn add_column_right(&mut self, cell: &CellLocation) {
+    pub fn add_column_right(&mut self, cell: &CellLocation) {
         self.add_column(cell, true);
     }
-    fn add_column_left(&mut self, cell: &CellLocation) {
+    pub fn add_column_left(&mut self, cell: &CellLocation) {
         self.add_column(cell, false);
     }
-    fn add_column(&mut self, cell: &CellLocation, is_right: bool) {
+    pub fn add_column(&mut self, cell: &CellLocation, is_right: bool) {
         let mut parent = cell.clone();
         let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
             panic!();
@@ -121,7 +121,7 @@ impl Document {
             *width += 1;
         }
     }
-    fn add_row(&mut self, cell: &CellLocation, is_down: bool) {
+    pub fn add_row(&mut self, cell: &CellLocation, is_down: bool) {
         let mut parent = cell.clone();
         let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
             panic!();
@@ -134,19 +134,19 @@ impl Document {
             *height += 1;
         }
     }
-    fn add_row_above(&mut self, cell: &CellLocation) {
+    pub fn add_row_above(&mut self, cell: &CellLocation) {
         self.add_row(cell, false);
     }
-    fn add_row_below(&mut self, cell: &CellLocation) {
+    pub fn add_row_below(&mut self, cell: &CellLocation) {
         self.add_row(cell, true);
     }
-    fn edit_symbol(&mut self, cell: &CellLocation, new: &str) {
+    pub fn edit_symbol(&mut self, cell: &CellLocation, new: &str) {
         let Cell::Symbol(s) = self.resolve_mut(cell) else {
             panic!();
         };
         *s = new.to_owned();
     }
-    fn edit_variant(&mut self, cell: &CellLocation, variant_to: usize, types: &Types) {
+    pub fn edit_variant(&mut self, cell: &CellLocation, variant_to: usize, types: &Types) {
         let Cell::Struct(StructVal { id, variant, fields }) = self.resolve_mut(cell) else {
             panic!();
         };
@@ -154,10 +154,68 @@ impl Document {
         *fields = new_fields;
         *variant = variant_to;
     }
+    pub fn delete_row_above(&mut self, cell: &CellLocation) {
+        let mut parent = cell.clone();
+        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+            panic!();
+        };
+        if y == 0 { return; }
+        let parent = self.resolve_mut(&parent);
+        if let Cell::Tree(Tree { contents, width, height }) = parent {
+            for _ in (0 .. *width) {
+                contents.remove((y - 1) * *width);
+            }
+            *height -= 1;
+        }
+    }
+    pub fn delete_row_below(&mut self, cell: &CellLocation) {
+        let mut parent = cell.clone();
+        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+            panic!();
+        };
+        let parent = self.resolve_mut(&parent);
+        if let Cell::Tree(Tree { contents, width, height }) = parent {
+            if y == *height - 1 {
+                return;
+            }
+            for _ in (0 .. *width) {
+                contents.remove((y + 1) * *width);
+            }
+            *height -= 1;
+        }
+    }
+    pub fn delete_column_left(&mut self, cell: &CellLocation) {
+        let mut parent = cell.clone();
+        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+            panic!();
+        };
+        if x == 0 { return; }
+        let parent = self.resolve_mut(&parent);
+        if let Cell::Tree(Tree { contents, width, height }) = parent {
+            for i in (0 .. *height).map(|i| i * *width + x - 1).rev() {
+                contents.remove(i);
+            }
+            *width -= 1;
+        }
+    }
+    pub fn delete_column_right(&mut self, cell: &CellLocation) {
+        let mut parent = cell.clone();
+        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+            panic!();
+        };
+        let parent = self.resolve_mut(&parent);
+        if let Cell::Tree(Tree { contents, width, height }) = parent {
+            if x == *width - 1 { return; }
+            for i in (0 .. *height).map(|i| i * *width + x + 1).rev() {
+                contents.remove(i);
+            }
+            *width -= 1;
+        }
+    }
 }
 
 impl Cell {
-    fn index(&self, path: &PathStep) -> &Self {
+    pub fn index(&self, path: &PathStep) -> &Self {
         match (self, path) {
             (
                 Cell::Tree(Tree {
@@ -180,7 +238,7 @@ impl Cell {
             _ => panic!(),
         }
     }
-    fn index_mut(&mut self, path: &PathStep) -> &mut Self {
+    pub fn index_mut(&mut self, path: &PathStep) -> &mut Self {
         match (self, path) {
             (
                 Cell::Tree(Tree {
@@ -207,62 +265,62 @@ impl Cell {
 
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Types(Vec<StructDef>);
+pub struct Types(Vec<StructDef>);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct StructDef {
-    name: String,
-    variants: Vec<StructVariant>,
+pub struct StructDef {
+    pub name: String,
+    pub variants: Vec<StructVariant>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct StructVariant {
-    name: String,
-    fields: Vec<FieldDef>,
+pub struct StructVariant {
+    pub name: String,
+    pub fields: Vec<FieldDef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct FieldDef {
-    name: String,
-    value: CellValue,
-    is_tree: bool,
+pub struct FieldDef {
+    pub name: String,
+    pub value: CellValue,
+    pub is_tree: bool,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum CellValue {
+pub enum CellValue {
     Symbol,
     Struct(usize),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Document {
-    rim_field: FieldDef,
-    rim: Cell,
-    ram: Cell,
-    rom: Cell,
+pub struct Document {
+    pub rim_field: FieldDef,
+    pub rim: Cell,
+    pub ram: Cell,
+    pub rom: Cell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct CellLocation {
-    region: Region,
-    path: Vec<PathStep>,
+pub struct CellLocation {
+    pub region: Region,
+    pub path: Vec<PathStep>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum PathStep {
+pub enum PathStep {
     Struct(usize),
     Tree(usize, usize),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Region {
+pub enum Region {
     Rim,
     Ram,
     Rom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Cell {
+pub enum Cell {
     Symbol(String),
     Struct(StructVal),
     Tree(Tree),
@@ -270,32 +328,32 @@ enum Cell {
 }
 
 impl Cell {
-    fn tree(&self) -> &Tree {
+    pub fn tree(&self) -> &Tree {
         let Self::Tree(t) = self else { panic!(); };
         t
     }
-    fn struct_val(&self) -> &StructVal {
+    pub fn struct_val(&self) -> &StructVal {
         let Self::Struct(s) = self else { panic!(); };
         s
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Tree {
-    contents: Vec<Cell>,
-    width: usize,
-    height: usize,
+pub struct Tree {
+    pub contents: Vec<Cell>,
+    pub width: usize,
+    pub height: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct StructVal {
-    id: usize,
-    variant: usize,
-    fields: Vec<Cell>,
+pub struct StructVal {
+    pub id: usize,
+    pub variant: usize,
+    pub fields: Vec<Cell>,
 }
 
 impl FieldDef {
-    fn default(&self) -> Cell {
+    pub fn default(&self) -> Cell {
         if self.is_tree {
             Cell::Tree(Tree { contents: vec![Cell::Empty], width: 1, height: 1 })
         } else {
