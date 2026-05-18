@@ -3,8 +3,9 @@
 //! The Bevy view layer (impl-spec-v2 §6 onward) is not yet built. For now this
 //! exercises the document core: it builds a sample document and runs the
 //! load-time integrity check.
+//! 
 
-mod document;
+use rudra::document;
 
 use document::*;
 

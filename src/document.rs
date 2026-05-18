@@ -300,7 +300,7 @@ impl RegionMask {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Selection {
     /// The one highlighted Rom cell (invariant 9).
     pub rom: CellLocation,
@@ -340,40 +340,6 @@ pub struct DocumentSnapshot {
     pub ram: CellContent,
     pub rim: CellContent,
     pub selection: Selection,
-}
-
-// Selection is part of the snapshot, so it needs serde.
-impl Serialize for Selection {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("Selection", 5)?;
-        st.serialize_field("rom", &self.rom)?;
-        st.serialize_field("rim", &self.rim)?;
-        st.serialize_field("ram", &self.ram)?;
-        st.serialize_field("superhighlighted", &self.superhighlighted)?;
-        st.serialize_field("red", &self.red)?;
-        st.end()
-    }
-}
-impl<'de> Deserialize<'de> for Selection {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        #[derive(Deserialize)]
-        struct Raw {
-            rom: CellLocation,
-            rim: CellLocation,
-            ram: Vec<CellLocation>,
-            superhighlighted: CellLocation,
-            red: Vec<CellLocation>,
-        }
-        let r = Raw::deserialize(d)?;
-        Ok(Selection {
-            rom: r.rom,
-            rim: r.rim,
-            ram: r.ram,
-            superhighlighted: r.superhighlighted,
-            red: r.red,
-        })
-    }
 }
 
 // ---- defaults (§4.6) ------------------------------------------------------
@@ -543,9 +509,10 @@ impl Document {
 
     // -- §7  Selection ------------------------------------------------------
 
-    /// A selection click on `loc` (impl spec §7). Updates highlight and
-    /// superhighlight, clears `red`, and — for a Rom/Rim pick — clears Ram's
-    /// highlights (the `spec-v4` amendment to design §6.1).
+    /// A selection click on `loc` (impl spec §7). Moves the superhighlight
+    /// anchor to `loc`, updates the clicked region's highlight, clears `red`,
+    /// and — for a Rom/Rim pick — clears Ram's highlights (the `spec-v4`
+    /// amendment to design §6.1).
     pub fn select(&mut self, loc: CellLocation) {
         self.selection.red.clear();
         match loc.region {
@@ -558,15 +525,18 @@ impl Document {
                 self.selection.ram.clear();
             },
             Region::Ram => {
+                // A Ram click toggles this cell's highlight on or off.
                 if let Some(pos) = self.selection.ram.iter().position(|l| *l == loc) {
-                    // toggle-off: superhighlight does not move (de-selecting *is* superselecting)
-                    self.selection.ram.remove(pos);
+                    self.selection.ram.remove(pos); // toggle off
                 } else {
-                    // toggle-on: this cell becomes the superhighlighted anchor
-                    self.selection.ram.push(loc.clone());
+                    self.selection.ram.push(loc.clone()); // toggle on
                 }
             },
         }
+        // Every selection click moves the superhighlight anchor to the clicked
+        // cell — in any region, and on a Ram toggle-off too. After a toggle-off
+        // the cell is superhighlighted but no longer highlighted: the two
+        // states come apart (design §6.2).
         self.selection.superhighlighted = loc;
         // A selection changes which cells render highlighted; rebuild the view.
         self.dirty = RegionMask::all();
@@ -827,11 +797,20 @@ pub enum Operation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The document changed; the caller should snapshot for undo and rebuild.
+    /// The document's content changed. The caller snapshots for undo (§8.4)
+    /// and rebuilds the dirtied region(s).
     Applied,
-    /// A copy failed validation; `selection.red` was set, nothing else changed.
+    /// The operation was coherent but a semantic check refused it — at present
+    /// only a copy whose source fails validation against its destination
+    /// (§9.2). No content changed, but `selection.red` was set, so the caller
+    /// still rebuilds (to show the red) and does *not* snapshot. This is the
+    /// only non-`Applied` outcome that has a side effect.
     Rejected,
-    /// The operation was not applicable; nothing changed.
+    /// The operation was coherent but vacuous — it legitimately had nothing to
+    /// do (e.g. a copy with no destination selected, or a breadth operation
+    /// with no neighbouring row/column to act on). Nothing changed at all and
+    /// the caller does nothing. The line against `Rejected`: a `NoOp` asked
+    /// for nothing, a `Rejected` asked for something and was turned down.
     NoOp,
 }
 
@@ -1385,14 +1364,21 @@ mod tests {
     #[test]
     fn selection_ram_toggle() {
         let mut d = tree_doc();
-        let c = CellLocation::root(Region::Ram);
-        d.select(c.clone()); // on
-        assert_eq!(d.selection.ram, vec![c.clone()]);
-        assert_eq!(d.selection.superhighlighted, c);
-        d.select(c.clone()); // off
-        assert!(d.selection.ram.is_empty());
-        // toggle-off does not move the superhighlight
-        assert_eq!(d.selection.superhighlighted, c);
+        // give Ram a second cell, so two distinct cells can be selected
+        let a = CellLocation { region: Region::Ram, path: vec![PathStep::Grid { row: 0, col: 0 }] };
+        apply(&mut d, Operation::AddRow { at: a.clone(), side: VSide::Below });
+        let b = CellLocation { region: Region::Ram, path: vec![PathStep::Grid { row: 1, col: 0 }] };
+
+        d.select(a.clone()); // toggle A on
+        d.select(b.clone()); // toggle B on
+        assert_eq!(d.selection.ram, vec![a.clone(), b.clone()]);
+        assert_eq!(d.selection.superhighlighted, b);
+
+        d.select(a.clone()); // toggle A off
+        assert_eq!(d.selection.ram, vec![b.clone()]); // A is no longer highlighted
+        // a Ram click — even a toggle-off — moves the superhighlight to that
+        // cell; A is now superhighlighted but not highlighted (design §6.2)
+        assert_eq!(d.selection.superhighlighted, a);
     }
 
     #[test]
@@ -1474,40 +1460,3 @@ mod tests {
         }
     }
 }
-
-/* notes.txt
-- instruction, from now on: ai should only print diffs when slightly editing files (not when making a complete
-  overhaul or creating a new file)
-
-- NOTE: document:346: why is Serialize and Deserialize manually implemented for Selection?  is it not the
-  same as the derive impl?
-- CHANGE: changes: document:562: toggle-off moves superhighlight. the cell becomes superhighlighted
-  but not highlighted.
-- REMEMBER: breadth operations to non-grid cells are noops. (legal) also trying to delete non-existent
-  rows/columns is a noop (not rejected)
-- NOTE: `Outcome::Rejected` only occurs for copy validation errors. What is the difference between
-  `Outcome::Rejected` and `Outcome::Noop`? Both do nothing. Should invalid breadth operations also be
-  `Outcome::Rejected`? What is their semantic difference, and is it used in code?
-- `apply_select_variant` returns `Outcome::Noop` when:
-  - trying to be applied to a non-struct (should panic instead? UI should handle this)
-  - something occurs which should be unreachable (should panic instead?)
-  - trying to select a variant out of range (should panic instead? UI should handle this)
-- it seems that the ai expects the document to always be well-formed, but not the operations. the
-  ai ensures that all operations can only produce well-formed documents, but does not assume that
-  the UI will ensure that all operations themselves are well-formed - accounting for nonsensical
-  operations. I do not know if this should be changed, but it should definitely be documented
-  like here, clearly. The question remains: should UI enforce invariants? Also, I am deliberating
-  on making cli operations on documents possible. if so, then this operation freedom is definitely
-  necessary. Maybe I should split the operations into two versions: the infallible, UI-triggered
-  version, and a fallible, checked-for-coherency cli-or-other-triggered version.
-- same with History::undo and History::redo: they include a check for can_redo and can_undo,
-  but if infallible since this has already been checked, for example due to the UI being the
-  trigger, then this is unnecessary. maybe there should also be checked and unchecked versions.
-- the unit tests are excellent and must be maintained upon making changes to the code. do we need
-  integration tests?
-- NOTE: the current implementation is very easy to reason about, but is not optimized for
-  performance. When optimizing for performance, I could keep the code in this file as a reference
-  to what was actually implemented, sort of like a complimentary addition to the impl spec, but
-  way more detailed, and not as a spec, but just to understand the basic methods of
-  implementation before they got confuscated by walkers, arenas, references and the like.
-*/
