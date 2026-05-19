@@ -607,26 +607,31 @@ fn spawn_cell(
                 .spawn((
                     base,
                     Node {
-                        flex_direction: FlexDirection::Column,
+                        // A real CSS grid, not nested flex rows: every cell
+                        // shares the same column and row tracks, so a cell that
+                        // grows grows its whole column/row and the grid stays
+                        // aligned - instead of each row flexing on its own.
+                        display: Display::Grid,
+                        grid_template_columns: vec![RepeatedGridTrack::auto(t.width as u16)],
+                        grid_template_rows: vec![RepeatedGridTrack::auto(t.height as u16)],
+                        // each track sizes to its largest cell; every cell then
+                        // stretches to fill its track, so the grid stays uniform
+                        justify_items: JustifyItems::Stretch,
+                        align_items: AlignItems::Stretch,
                         border: UiRect::all(Val::Px(CELL_BORDER)),
                         border_radius: BorderRadius::all(px(CELL_BORDER)),
                         ..default()
                     },
                 ))
                 .with_children(|grid| {
-                    // one flex row per grid row; cells are row-major in `contents`
+                    // cells are row-major in `contents`; the grid auto-flows
+                    // them left-to-right, top-to-bottom into its tracks
                     for y in 0..t.height {
-                        grid.spawn(Node {
-                            flex_direction: FlexDirection::Row,
-                            ..default()
-                        })
-                        .with_children(|row| {
-                            for x in 0..t.width {
-                                let inner = &t.contents[y * t.width + x];
-                                let inner_loc = child(loc, PathStep::Tree(x, y));
-                                spawn_cell(row, inner, &inner_loc, types, ui);
-                            }
-                        });
+                        for x in 0..t.width {
+                            let inner = &t.contents[y * t.width + x];
+                            let inner_loc = child(loc, PathStep::Tree(x, y));
+                            spawn_cell(grid, inner, &inner_loc, types, ui);
+                        }
                     }
                 })
                 .observe(on_cell_click)
