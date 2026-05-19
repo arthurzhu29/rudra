@@ -28,7 +28,7 @@ use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use crate::document2::*;
+use crate::document3::*;
 
 // ===========================================================================
 // Entry point
@@ -44,7 +44,7 @@ pub fn run() {
         value: CellValue::Symbol,
         is_tree: true,
     };
-    let document = Document::new(&types.0, rim_field);
+    let document = Document::new(&types, rim_field);
 
     App::new()
         .add_plugins(DefaultPlugins)
@@ -72,10 +72,8 @@ fn sample_types() -> Types {
         StructDef {
             name: "Pair".to_string(),
             variants: vec![
-                // variant 0: the nameless empty variant
-                StructVariant { name: String::new(), fields: vec![] },
                 // variant 1: two symbol fields
-                StructVariant {
+                VariantDef {
                     name: "xy".to_string(),
                     fields: vec![
                         FieldDef { name: "x".to_string(), value: CellValue::Symbol, is_tree: false },
@@ -88,8 +86,7 @@ fn sample_types() -> Types {
         StructDef {
             name: "Box".to_string(),
             variants: vec![
-                StructVariant { name: String::new(), fields: vec![] },
-                StructVariant {
+                VariantDef {
                     name: "grid".to_string(),
                     fields: vec![FieldDef {
                         name: "items".to_string(),
@@ -122,7 +119,7 @@ struct Dirty(bool);
 #[derive(Resource, Default)]
 struct Ui {
     /// The cell most operations act on - the "focused" / highlighted cell.
-    focused: Option<CellLocation>,
+    focused: Option<CellPath>,
     /// Copy is a two-click gesture; this tracks the in-between state.
     mode: Mode,
 }
@@ -134,7 +131,7 @@ enum Mode {
     Normal,
     /// Copy was pressed while `dest` was focused; the next cell click names the
     /// source, and the copy is performed.
-    AwaitingCopySource { dest: CellLocation },
+    AwaitingCopySource { dest: CellPath },
 }
 
 /// Independent pan/zoom for each of the three regions. Lives in a resource so
@@ -189,7 +186,7 @@ struct ViewRoot;
 
 /// A rendered cell carries the document location it stands for.
 #[derive(Component)]
-struct CellTag(CellLocation);
+struct CellTag(CellPath);
 
 /// A toolbar button carries the operation it triggers.
 #[derive(Component)]
@@ -386,8 +383,8 @@ fn spawn_region(
                             },
                         ))
                         .with_children(|content| {
-                            let root_loc = CellLocation { region, path: vec![] };
-                            spawn_cell(content, doc.root(region), &root_loc, types, ui);
+                            let root_loc = CellPath { region, path: vec![] };
+                            spawn_cell(content, &doc[region], &root_loc, types, ui);
                         });
                 });
         });
@@ -510,7 +507,7 @@ fn spawn_status(root: &mut ChildSpawnerCommands, ui: &Ui) {
 fn spawn_cell(
     parent: &mut ChildSpawnerCommands,
     cell: &Cell,
-    loc: &CellLocation,
+    loc: &CellPath,
     types: &Types,
     ui: &Ui,
 ) {
@@ -591,9 +588,13 @@ fn spawn_cell(
                         TextFont { font_size: 12.0, ..default() },
                         TextColor(HEADER_FG),
                     ));
-                    for (i, field) in sv.fields.iter().enumerate() {
-                        let field_loc = child(loc, PathStep::Struct(i));
-                        spawn_cell(c, field, &field_loc, types, ui);
+                    // for (i, field) in sv.fields.iter().enumerate() {
+                    //     let field_loc = child(loc, PathStep::Struct(i));
+                    //     spawn_cell(c, field, &field_loc, types, ui);
+                    // }
+                    if let Some(cell) = sv.grid.as_ref() {
+                        let grid_loc = child(loc, PathStep::IntoStruct);
+                        spawn_cell(c, cell, &grid_loc, types, ui);
                     }
                 })
                 .observe(on_cell_click)
@@ -638,6 +639,38 @@ fn spawn_cell(
                 .observe(observe_over)
                 .observe(observe_out);
         }
+        Cell::Field(field_val) => {
+            let struct_def = &types.0[field_val.struct_id];
+            let struct_name = &struct_def.name;
+            let variant_def = &struct_def.variants[field_val.variant_id];
+            let variant_name = &variant_def.name;
+            let field_name = &variant_def.fields[field_val.field_id].name;
+            parent
+                .spawn((
+                    base,
+                    Node {
+                        flex_direction: FlexDirection::Row,
+                        border: UiRect::all(Val::Px(CELL_BORDER)),
+                        border_radius: BorderRadius::all(px(CELL_BORDER)),
+                        // lalala
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    },
+                ))
+                .with_children(|hii| {
+                    hii.spawn((
+                        Text::new(format!("{}::{}::{}", struct_name, variant_name, field_name)),
+                        TextFont { font_size: 12.0, ..default() },
+                        TextColor(HEADER_FG),
+                    ));
+                    let value_loc = child(loc, PathStep::IntoField);
+                    spawn_cell(hii, &field_val.value, &value_loc, types, ui);
+                })
+                .observe(on_cell_click)
+                .observe(observe_over)
+                .observe(observe_out);
+        },
     }
 }
 
@@ -811,13 +844,13 @@ fn on_button_click(
             if !writable(&loc) {
                 return;
             }
-            let next = match doc.0.resolve(&loc) {
+            let next = match &doc.0[&loc] {
                 Cell::Struct(sv) => {
-                    let count = types.0[sv.id].variants.len();
+                    let count = types.0[sv.struct_id].variants.len();
                     if count == 0 {
                         return;
                     }
-                    (sv.variant + 1) % count
+                    (sv.variant_id + 1) % count
                 }
                 _ => return, // not a struct - nothing to cycle
             };
@@ -852,7 +885,7 @@ fn on_button_click(
                 _ => unreachable!(),
             }
             // a structural change can shift positional paths - drop the focus
-            // rather than risk resolving a stale `CellLocation`
+            // rather than risk resolving a stale `CellPath`
             ui.focused = None;
             dirty.0 = true;
         }
@@ -911,7 +944,7 @@ fn symbol_typing(
         return;
     };
     // only act when the focused cell actually is a symbol
-    let mut text = match doc.0.resolve(&loc) {
+    let mut text = match &doc.0[&loc] {
         Cell::Symbol(s) => s.clone(),
         _ => return,
     };
@@ -965,12 +998,14 @@ const BG_SYMBOL: Color = Color::srgb(0.17, 0.19, 0.25);
 const BG_EMPTY: Color = Color::srgb(0.12, 0.12, 0.14);
 const BG_STRUCT: Color = Color::srgb(0.23, 0.19, 0.15);
 const BG_TREE: Color = Color::srgb(0.14, 0.21, 0.21);
+const BG_FIELD: Color = Color::srgb(0.11, 0.28, 0.08);
 
 // cell borders, by cell type
 const BD_SYMBOL: Color = Color::srgb(0.36, 0.40, 0.52);
 const BD_EMPTY: Color = Color::srgb(0.26, 0.26, 0.30);
 const BD_STRUCT: Color = Color::srgb(0.52, 0.42, 0.30);
 const BD_TREE: Color = Color::srgb(0.30, 0.52, 0.52);
+const BD_FIELD: Color = Color::srgb(0.22, 0.56, 0.16);
 
 // selection - shown on top of the per-type colours
 const FOCUS_BG: Color = Color::srgb(0.18, 0.30, 0.46);
@@ -1003,7 +1038,7 @@ struct CellVisual {
 /// Resolve a cell's colours from its type and the current selection state.
 /// Selection wins over the per-type colour; the hover colour is just the
 /// resting background, lightened.
-fn cell_visual(loc: &CellLocation, ui: &Ui, cell: &Cell) -> CellVisual {
+fn cell_visual(loc: &CellPath, ui: &Ui, cell: &Cell) -> CellVisual {
     let is_copy_dest = matches!(&ui.mode, Mode::AwaitingCopySource { dest } if dest == loc);
     let is_focused = ui.focused.as_ref() == Some(loc);
 
@@ -1030,6 +1065,7 @@ fn type_bg(cell: &Cell) -> Color {
         Cell::Empty => BG_EMPTY,
         Cell::Struct(_) => BG_STRUCT,
         Cell::Tree(_) => BG_TREE,
+        Cell::Field(_) => BG_FIELD,
     }
 }
 
@@ -1039,6 +1075,7 @@ fn type_border(cell: &Cell) -> Color {
         Cell::Empty => BD_EMPTY,
         Cell::Struct(_) => BD_STRUCT,
         Cell::Tree(_) => BD_TREE,
+        Cell::Field(_) => BD_FIELD,
     }
 }
 
@@ -1057,26 +1094,26 @@ fn lighten(c: Color, t: f32) -> Color {
 // ===========================================================================
 
 /// `loc` with one more path step appended.
-fn child(loc: &CellLocation, step: PathStep) -> CellLocation {
+fn child(loc: &CellPath, step: PathStep) -> CellPath {
     let mut l = loc.clone();
     l.path.push(step);
     l
 }
 
 /// Rom is the read-only palette - only Ram and Rim accept mutations.
-fn writable(loc: &CellLocation) -> bool {
+fn writable(loc: &CellPath) -> bool {
     loc.region != Region::Rom
 }
 
 /// A breadth op needs a cell whose location ends in a grid step.
-fn is_grid_cell(loc: &CellLocation) -> bool {
+fn is_grid_cell(loc: &CellPath) -> bool {
     matches!(loc.path.last(), Some(PathStep::Tree(_, _)))
 }
 
 /// e.g. `"Pair [xy]"` - struct name and the current variant's name.
 fn struct_header(sv: &StructVal, types: &Types) -> String {
-    let def = &types.0[sv.id];
-    let variant = &def.variants[sv.variant];
+    let def = &types.0[sv.struct_id];
+    let variant = &def.variants[sv.variant_id];
     let vname = if variant.name.is_empty() { "-" } else { variant.name.as_str() };
     format!("{} [{}]", def.name, vname)
 }

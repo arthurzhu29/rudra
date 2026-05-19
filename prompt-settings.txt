@@ -3,5 +3,6 @@ Prompt Directives Start
 - Don't create large files from scratch - use diffs
 - Always check to see that you have the latest version of the repo
 - Don't assume anything. When ambiguous, ask user
+- The user loves the `ask_user_input_v0` tool. Use where applicable.
 
 Prompt Directives End

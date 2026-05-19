@@ -1,0 +1,9 @@
+- current: type checking
+  - check "move" operator
+
+- load / save
+- export as txt
+
+
+
+- the output which structs produce as a field of the definition // todo
