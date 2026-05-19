@@ -348,7 +348,28 @@ pub fn sample_types() -> Types {
                     },
                 ],
             },
-            dummy.clone(),
+            // for_stmt
+            // ['async'] 'for' star_targets 'in' star_expressions ':' block [else_block]
+            //
+            // needed new:
+            // - star_targets
+            // - star_expressions
+            // - [else_block]
+            StructDef {
+                name: "for_stmt".to_string(),
+                variants: vec![
+                    VariantDef {
+                        name: "['async'] 'for' star_targets 'in' star_expressions ':' block [else_block]".to_string(),
+                        fields: vec![
+                            FieldDef { name: "['async']".to_string(), value: CellValue::Struct(38), is_tree: false },
+                            FieldDef { name: "star_targets".to_string(), value: CellValue::Struct(42), is_tree: false },
+                            FieldDef { name: "star_expressions".to_string(), value: CellValue::Struct(43), is_tree: false },
+                            FieldDef { name: "block".to_string(), value: CellValue::Struct(33), is_tree: false },
+                            FieldDef { name: "[else_block]".to_string(), value: CellValue::Struct(44), is_tree: false },
+                        ],
+                    },
+                ],
+            },
             dummy.clone(),
             dummy.clone(),
             dummy.clone(),
@@ -390,6 +411,12 @@ pub fn sample_types() -> Types {
             // (',' with_item), 40
             dummy.clone(),
             // ','?, 41
+            dummy.clone(),
+            // star_targets, 42
+            dummy.clone(),
+            // star_expressions, 43
+            dummy.clone(),
+            // [else_block], 44
             dummy.clone(),
         ],
         rim: FieldDef {
@@ -565,6 +592,18 @@ pub const STATIC_BUILDER: StaticBuilder = StaticBuilder {
             (&[], ""),
         ],
         // ','?
+        &[
+            (&[], ""),
+        ],
+        // star_targets
+        &[
+            (&[], ""),
+        ],
+        // star_expressions
+        &[
+            (&[], ""),
+        ],
+        // [else_block]
         &[
             (&[], ""),
         ],

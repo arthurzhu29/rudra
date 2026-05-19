@@ -183,8 +183,17 @@ struct CenterButton(Region);
 #[derive(Component)]
 struct RegionViewport(Region);
 
-/// The content node of a region - holds the cell tree and carries the
-/// `UiTransform` that `apply_views` drives from `Views`.
+/// The zero-size pivot node of a region. Pinned to the viewport's top-left, it
+/// carries the pan/zoom `UiTransform` that `apply_views` drives from `Views`.
+/// Having no extent makes that transform a clean top-left-origin camera - its
+/// centre and its corner coincide - so the pan/zoom maths needs no assumption
+/// about how Bevy pivots node transforms.
+#[derive(Component)]
+struct RegionPivot(Region);
+
+/// The content node of a region - the pivot's child that shrink-wraps the cell
+/// tree. It is not transformed itself (it only inherits the pivot's), so its
+/// `ComputedNode` size is the tree's natural size, which `on_center_click` uses.
 #[derive(Component)]
 struct RegionContent(Region);
 
@@ -346,17 +355,20 @@ fn spawn_region(
                 ))
                 .observe(on_viewport_drag)
                 .with_children(|viewport| {
-                    // the content node: holds the cell tree and is transformed
-                    // (pan + zoom) by `apply_views`. Absolutely positioned so
-                    // its size shrink-wraps the tree and the transform origin
-                    // is the viewport's top-left.
+                    // A zero-size *pivot* node, pinned to the viewport's
+                    // top-left, carries the pan/zoom `UiTransform`. Because it
+                    // has no extent its centre and corner coincide, so the
+                    // transform acts as a plain top-left-origin camera however
+                    // Bevy chooses to pivot node transforms.
                     viewport
                         .spawn((
-                            RegionContent(region),
+                            RegionPivot(region),
                             Node {
                                 position_type: PositionType::Absolute,
                                 left: Val::Px(0.0),
                                 top: Val::Px(0.0),
+                                width: Val::Px(0.0),
+                                height: Val::Px(0.0),
                                 ..default()
                             },
                             UiTransform {
@@ -365,9 +377,25 @@ fn spawn_region(
                                 ..default()
                             },
                         ))
-                        .with_children(|content| {
-                            let root_loc = CellPath { region, path: vec![] };
-                            spawn_cell(content, &doc[region], &root_loc, types, ui);
+                        .with_children(|pivot| {
+                            // the content node: shrink-wraps the cell tree.
+                            // Absolutely positioned at the pivot's origin; it
+                            // only inherits the transform, so its own
+                            // `ComputedNode` size stays the tree's natural size.
+                            pivot
+                                .spawn((
+                                    RegionContent(region),
+                                    Node {
+                                        position_type: PositionType::Absolute,
+                                        left: Val::Px(0.0),
+                                        top: Val::Px(0.0),
+                                        ..default()
+                                    },
+                                ))
+                                .with_children(|content| {
+                                    let root_loc = CellPath { region, path: vec![] };
+                                    spawn_cell(content, &doc[region], &root_loc, types, ui);
+                                });
                         });
                 });
         });
@@ -726,29 +754,49 @@ fn on_viewport_drag(
     views.get_mut(region).pan += drag.delta;
 }
 
-/// The mouse wheel zooms whichever region the cursor is over.
+/// The mouse wheel zooms whichever region the cursor is over, keeping the point
+/// under the cursor fixed (zoom *into* the cursor, like a map).
 fn zoom_on_scroll(
     mut wheel: MessageReader<MouseWheel>,
-    viewports: Query<(&RegionViewport, &RelativeCursorPosition)>,
+    viewports: Query<(&RegionViewport, &RelativeCursorPosition, &ComputedNode)>,
     mut views: ResMut<Views>,
 ) {
     let dy: f32 = wheel.read().map(|e| e.y).sum();
     if dy == 0.0 {
         return;
     }
-    for (&RegionViewport(region), cursor) in &viewports {
-        if cursor.cursor_over() {
-            let v = views.get_mut(region);
-            v.zoom = (v.zoom * ZOOM_STEP.powf(dy)).clamp(ZOOM_MIN, ZOOM_MAX);
+    for (&RegionViewport(region), cursor, node) in &viewports {
+        if !cursor.cursor_over() {
+            continue;
         }
+        // The cursor's position inside the viewport, in px from its top-left.
+        // API NOTE: `normalized` is taken as centred (-0.5..0.5), hence `+ 0.5`;
+        // if zoom drifts toward a corner this Bevy build normalises 0..1
+        // instead - then drop the `+ 0.5`.
+        let Some(norm) = cursor.normalized else {
+            continue;
+        };
+        let focus = (norm + Vec2::splat(0.5)) * node.size();
+
+        let v = views.get_mut(region);
+        let old = v.zoom;
+        let new = (old * ZOOM_STEP.powf(dy)).clamp(ZOOM_MIN, ZOOM_MAX);
+        if new == old {
+            continue; // already at a zoom limit - don't drift the pan
+        }
+        // The pivot is a top-left camera: screen = pan + point * zoom. For the
+        // content point under the cursor to stay under it after the scale:
+        //   focus = pan + p*old = pan' + p*new   =>   pan' = focus - (focus - pan) * new/old
+        v.pan = focus - (focus - v.pan) * (new / old);
+        v.zoom = new;
     }
 }
 
 /// Push the current pan/zoom from `Views` onto each region's content node.
 /// Cheap (three entities) and idempotent; runs every frame so drag/scroll show
 /// immediately and a just-rebuilt content node is corrected the same frame.
-fn apply_views(views: Res<Views>, mut contents: Query<(&RegionContent, &mut UiTransform)>) {
-    for (&RegionContent(region), mut transform) in &mut contents {
+fn apply_views(views: Res<Views>, mut pivots: Query<(&RegionPivot, &mut UiTransform)>) {
+    for (&RegionPivot(region), mut transform) in &mut pivots {
         let v = views.get(region);
         transform.translation = Val2::px(v.pan.x, v.pan.y);
         transform.scale = Vec2::splat(v.zoom);
@@ -922,10 +970,9 @@ fn on_center_click(
 
     // largest zoom that still fits the whole root cell
     let zoom = (viewport.x / content.x).min(viewport.y / content.y);
-    // ...then offset so the scaled content sits centred in the viewport.
-    // (Assumes `UiTransform` scales about the node centre - if it scales about
-    // the top-left instead, use `(viewport - content * zoom) * 0.5`.)
-    let pan = (viewport - content) * 0.5;
+    // The pivot is a top-left camera (see `RegionPivot`): the scaled content
+    // spans `[pan, pan + content * zoom]`. Centre that span in the viewport.
+    let pan = (viewport - content * zoom) * 0.5;
 
     *views.get_mut(region) = ViewState { pan, zoom };
 }
