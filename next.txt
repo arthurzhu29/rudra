@@ -1,15 +1,8 @@
 - current: type checking
-  - check "move" operator
+  - check "move" operator and "copy" operator
   - check delete_row/column does not remove field cells
 
 
-
-- load / save
-- export as txt
-
-
-
-- the output which structs produce as a field of the definition // todo
 
 RESPONSE
 - I know that copy takes (dest, src) and mova takes (src, dest). that is to reflect
