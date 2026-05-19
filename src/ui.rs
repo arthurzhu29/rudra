@@ -39,12 +39,12 @@ pub fn run() {
 
     // The Rim canvas starts as a tree of symbols, so the grid operations
     // (add/delete row/column) have something to act on from the first frame.
-    let rim_field = FieldDef {
-        name: "canvas".to_string(),
-        value: CellValue::Symbol,
-        is_tree: true,
-    };
-    let document = Document::new(&types, rim_field);
+    // let rim_field = FieldDef {
+    //     name: "canvas".to_string(),
+    //     value: CellValue::Symbol,
+    //     is_tree: true,
+    // };
+    let document = crate::save_load::load(&types);
 
     App::new()
         .add_plugins(DefaultPlugins)
@@ -60,8 +60,8 @@ pub fn run() {
             Update,
             (zoom_on_scroll, symbol_typing, rebuild_view, apply_views).chain(),
         )
-        .add_systems(Update, save.run_if(
-    bevy::time::common_conditions::on_timer(std::time::Duration::from_secs(5))))
+        .add_systems(Update, (save, crate::save_load::save_query).run_if(
+    bevy::time::common_conditions::on_timer(std::time::Duration::from_secs_f32(0.5))))
         .run();
 }
 
@@ -69,36 +69,43 @@ pub fn run() {
 /// with a two-symbol variant (exercises variant cycling and field rendering)
 /// and one struct with a tree-typed field (exercises nested grids).
 fn sample_types() -> Types {
-    Types(vec![
-        // struct 0: "Pair"
-        StructDef {
-            name: "Pair".to_string(),
-            variants: vec![
-                // variant 1: two symbol fields
-                VariantDef {
-                    name: "xy".to_string(),
-                    fields: vec![
-                        FieldDef { name: "x".to_string(), value: CellValue::Symbol, is_tree: false },
-                        FieldDef { name: "y".to_string(), value: CellValue::Symbol, is_tree: false },
-                    ],
-                },
-            ],
+    Types {
+        types: vec![
+            // struct 0: "Pair"
+            StructDef {
+                name: "Pair".to_string(),
+                variants: vec![
+                    // variant 1: two symbol fields
+                    VariantDef {
+                        name: "xy".to_string(),
+                        fields: vec![
+                            FieldDef { name: "x".to_string(), value: CellValue::Symbol, is_tree: false },
+                            FieldDef { name: "y".to_string(), value: CellValue::Symbol, is_tree: false },
+                        ],
+                    },
+                ],
+            },
+            // struct 1: "Box"
+            StructDef {
+                name: "Box".to_string(),
+                variants: vec![
+                    VariantDef {
+                        name: "grid".to_string(),
+                        fields: vec![FieldDef {
+                            name: "items".to_string(),
+                            value: CellValue::Symbol,
+                            is_tree: true,
+                        }],
+                    },
+                ],
+            },
+        ],
+        rim: FieldDef {
+            name: "canvas".to_string(),
+            value: CellValue::Struct(0),
+            is_tree: false,
         },
-        // struct 1: "Box"
-        StructDef {
-            name: "Box".to_string(),
-            variants: vec![
-                VariantDef {
-                    name: "grid".to_string(),
-                    fields: vec![FieldDef {
-                        name: "items".to_string(),
-                        value: CellValue::Symbol,
-                        is_tree: true,
-                    }],
-                },
-            ],
-        },
-    ])
+    }
 }
 pub const STATIC_BUILDER: StaticBuilder = StaticBuilder {
     root: ", ",
@@ -138,7 +145,7 @@ pub fn save(document: Res<Doc>) {
 
 /// The document - the source of truth. Wrapped so it can be a Bevy resource.
 #[derive(Resource)]
-struct Doc(Document);
+pub struct Doc(pub Document);
 
 /// The schema. Needed by `edit_variant` and to render struct headers.
 #[derive(Resource)]
@@ -673,7 +680,7 @@ fn spawn_cell(
                 .observe(observe_out);
         }
         Cell::Field(field_val) => {
-            let struct_def = &types.0[field_val.struct_id];
+            let struct_def = &types.types[field_val.struct_id];
             let struct_name = &struct_def.name;
             let variant_def = &struct_def.variants[field_val.variant_id];
             let variant_name = &variant_def.name;
@@ -879,7 +886,7 @@ fn on_button_click(
             }
             let next = match &doc.0[&loc] {
                 Cell::Struct(sv) => {
-                    let count = types.0[sv.struct_id].variants.len();
+                    let count = types.types[sv.struct_id].variants.len();
                     if count == 0 {
                         return;
                     }
@@ -1145,7 +1152,7 @@ fn is_grid_cell(loc: &CellPath) -> bool {
 
 /// e.g. `"Pair [xy]"` - struct name and the current variant's name.
 fn struct_header(sv: &StructVal, types: &Types) -> String {
-    let def = &types.0[sv.struct_id];
+    let def = &types.types[sv.struct_id];
     let variant = &def.variants[sv.variant_id];
     let vname = if variant.name.is_empty() { "-" } else { variant.name.as_str() };
     format!("{} [{}]", def.name, vname)

@@ -1,15 +1,15 @@
 use std::{mem, ops::{Index, IndexMut}};
+use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Document {
-    pub rim_field: FieldDef,
     pub rim: Cell,
     pub ram: Cell,
     pub rom: Cell,
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
 pub enum Cell {
     Symbol(String),
     Struct(StructVal),
@@ -19,7 +19,7 @@ pub enum Cell {
     Field(FieldVal),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FieldVal {
     pub struct_id: usize,
     pub variant_id: usize,
@@ -27,14 +27,14 @@ pub struct FieldVal {
     pub value: Box<Cell>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StructVal {
     pub struct_id: usize,
     pub variant_id: usize,
     pub grid: Option<Box<Cell>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Tree {
     pub contents: Vec<Cell>,
     pub width: usize,
@@ -42,20 +42,20 @@ pub struct Tree {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct CellPath {
     pub region: Region,
     pub path: Vec<PathStep>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PathStep {
     IntoStruct,
     IntoField,
     Tree(usize, usize),
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Region {
     Rim,
     Ram,
@@ -63,29 +63,32 @@ pub enum Region {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Types(pub Vec<StructDef>);
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Types {
+    pub types: Vec<StructDef>,
+    pub rim: FieldDef,
+}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StructDef {
     pub name: String,
     pub variants: Vec<VariantDef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct VariantDef {
     pub name: String,
     pub fields: Vec<FieldDef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct FieldDef {
     pub name: String,
     pub value: CellValue,
     pub is_tree: bool,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum CellValue {
     Symbol,
     Struct(usize),
@@ -116,7 +119,7 @@ impl Types {
             struct_id,
             variant_id: 0,
             grid: {
-                let contents = self.0[struct_id].variants[variant_id].fields.iter().enumerate().map(|(field_id, fd)| Cell::Field(FieldVal { struct_id, variant_id, field_id, value: Box::new(fd.default(self)) })).collect::<Vec<_>>();
+                let contents = self.types[struct_id].variants[variant_id].fields.iter().enumerate().map(|(field_id, fd)| Cell::Field(FieldVal { struct_id, variant_id, field_id, value: Box::new(fd.default(self)) })).collect::<Vec<_>>();
                 (!contents.is_empty()).then_some(
                     Box::new(Cell::Tree(Tree {
                         width: 1,
@@ -149,16 +152,15 @@ impl Tree {
 }
 
 impl Document {
-    pub fn new(types: &Types, rim_field: FieldDef) -> Self {
+    pub fn new(types: &Types) -> Self {
         Document {
-            rim: rim_field.default(types),
-            rim_field,
+            rim: types.rim.default(types),
             ram: Tree::any_default(),
             rom: Cell::Tree({
-                let width = types.0.iter().map(|sd| sd.variants.len()).max().unwrap_or(1);
-                let height = types.0.len() + 2;
+                let width = types.types.iter().map(|sd| sd.variants.len()).max().unwrap_or(1);
+                let height = types.types.len() + 2;
                 let mut contents = Vec::with_capacity(width * height);
-                for (struct_id, sd) in types.0.iter().enumerate() {
+                for (struct_id, sd) in types.types.iter().enumerate() {
                     let variants = sd.variants.len();
                     for variant_id in 0 .. variants {
                         contents.push(types.default_struct_variant(struct_id, variant_id));
