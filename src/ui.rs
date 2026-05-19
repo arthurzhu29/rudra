@@ -98,6 +98,9 @@ struct Ui {
     focused: Option<CellPath>,
     /// Copy is a two-click gesture; this tracks the in-between state.
     mode: Mode,
+    /// A cell whose copy/move was just type-rejected. Flagged red until the
+    /// next cell click clears it.
+    rejected: Option<CellPath>,
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -108,6 +111,9 @@ enum Mode {
     /// Copy was pressed while `dest` was focused; the next cell click names the
     /// source, and the copy is performed.
     AwaitingCopySource { dest: CellPath },
+    /// Move was pressed while `src` was focused; the next cell click names the
+    /// destination, and the move is performed.
+    AwaitingMoveDest { src: CellPath },
 }
 
 /// Independent pan/zoom for each of the three regions. Lives in a resource so
@@ -204,6 +210,7 @@ struct HoverBorder {
 #[derive(Clone, Copy)]
 enum Action {
     Copy,
+    Move,
     AddRowAbove,
     AddRowBelow,
     AddColLeft,
@@ -415,6 +422,7 @@ fn spawn_toolbar(root: &mut ChildSpawnerCommands) {
     // arrow glyphs.
     let actions = [
         ("Copy", Action::Copy),
+        ("Move", Action::Move),
         ("Row+ above", Action::AddRowAbove),
         ("Row+ below", Action::AddRowBelow),
         ("Col+ left", Action::AddColLeft),
@@ -506,8 +514,6 @@ fn spawn_cell(
                 .spawn((
                     base,
                     Node {
-                        min_width: Val::Px(44.0),
-                        min_height: Val::Px(28.0),
                         border: UiRect::all(Val::Px(CELL_BORDER)),
                         border_radius: BorderRadius::all(px(CELL_BORDER)),
                         align_items: AlignItems::Center,
@@ -533,8 +539,6 @@ fn spawn_cell(
                 .spawn((
                     base,
                     Node {
-                        min_width: Val::Px(44.0),
-                        min_height: Val::Px(28.0),
                         border: UiRect::all(Val::Px(CELL_BORDER)),
                         border_radius: BorderRadius::all(px(CELL_BORDER)),
                         ..default()
@@ -762,6 +766,7 @@ fn on_cell_click(
     tags: Query<&CellTag>,
     mut ui: ResMut<Ui>,
     mut doc: ResMut<Doc>,
+    schema: Res<Schema>,
     mut dirty: ResMut<Dirty>,
 ) {
     // a click on an inner cell must not also register on its container
@@ -772,12 +777,24 @@ fn on_cell_click(
     };
     let clicked = tag.0.clone();
 
-    // take() leaves `Mode::Normal` behind - so a copy is one-shot
+    // any cell click clears a previous copy/move rejection highlight
+    ui.rejected = None;
+
+    // take() leaves `Mode::Normal` behind - so copy/move are one-shot
     match std::mem::take(&mut ui.mode) {
         Mode::AwaitingCopySource { dest } => {
-            // Rom is the read-only palette; it can be a source but not a target
-            if writable(&dest) {
-                doc.0.copy(&dest, &clicked);
+            // copy/mova reject illegal or mistyped operations (Rom is read-only,
+            // a field cell may not go loose, a value must match its field type,
+            // ...) and report the offending cell; flag it red.
+            if let Err(bad) = doc.0.copy(&dest, &clicked, &schema.0) {
+                ui.rejected = Some(bad);
+            }
+            ui.focused = Some(clicked);
+            dirty.0 = true;
+        }
+        Mode::AwaitingMoveDest { src } => {
+            if let Err(bad) = doc.0.mova(&src, &clicked, &schema.0) {
+                ui.rejected = Some(bad);
             }
             ui.focused = Some(clicked);
             dirty.0 = true;
@@ -813,6 +830,13 @@ fn on_button_click(
         Action::Copy => {
             ui.mode = Mode::AwaitingCopySource { dest: loc };
             dirty.0 = true; // refresh the status line + the dest highlight
+        }
+
+        // Move: remember the focused cell as the source, then wait for a
+        // destination click.
+        Action::Move => {
+            ui.mode = Mode::AwaitingMoveDest { src: loc };
+            dirty.0 = true;
         }
 
         // Variant cycling: only on a struct, only where writable.
@@ -988,6 +1012,8 @@ const FOCUS_BG: Color = Color::srgb(0.18, 0.30, 0.46);
 const FOCUS_BORDER: Color = Color::srgb(0.40, 0.66, 1.00);
 const COPY_DEST_BG: Color = Color::srgb(0.34, 0.24, 0.10);
 const COPY_DEST_BORDER: Color = Color::srgb(1.00, 0.66, 0.26);
+const REJECT_BG: Color = Color::srgb(0.40, 0.13, 0.13);
+const REJECT_BORDER: Color = Color::srgb(0.95, 0.30, 0.30);
 
 /// Cell border thickness, in px.
 const CELL_BORDER: f32 = 5.0;
@@ -1015,10 +1041,16 @@ struct CellVisual {
 /// Selection wins over the per-type colour; the hover colour is just the
 /// resting background, lightened.
 fn cell_visual(loc: &CellPath, ui: &Ui, cell: &Cell) -> CellVisual {
+    let is_rejected = ui.rejected.as_ref() == Some(loc);
     let is_copy_dest = matches!(&ui.mode, Mode::AwaitingCopySource { dest } if dest == loc);
+    let is_move_src = matches!(&ui.mode, Mode::AwaitingMoveDest { src } if src == loc);
     let is_focused = ui.focused.as_ref() == Some(loc);
 
-    let (rest_bg, rest_border) = if is_copy_dest {
+    let (rest_bg, rest_border) = if is_rejected {
+        // a copy or move was just rejected here
+        (REJECT_BG, REJECT_BORDER)
+    } else if is_copy_dest || is_move_src {
+        // the anchor cell of a pending copy/move gesture
         (COPY_DEST_BG, COPY_DEST_BORDER)
     } else if is_focused {
         (FOCUS_BG, FOCUS_BORDER)
@@ -1120,6 +1152,11 @@ fn status_text(ui: &Ui) -> String {
         Mode::AwaitingCopySource { .. } => {
             "Copy: now click the SOURCE cell to copy it into the highlighted \
              destination."
+                .to_string()
+        }
+        Mode::AwaitingMoveDest { .. } => {
+            "Move: now click the DESTINATION cell to move the highlighted \
+             source into it."
                 .to_string()
         }
     }

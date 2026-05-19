@@ -203,12 +203,41 @@ impl IndexMut<&CellPath> for Document {
 }
 // ops
 impl Document {
-    pub fn copy(&mut self, dest: &CellPath, src: &CellPath) {
-        self[dest] = self[src].clone();
+    /// Copy `src` onto `dest`. Applied only if the result is a well-formed
+    /// document; on rejection the document is left unchanged and the offending
+    /// cell (here, the destination) is returned so the UI can flag it red.
+    pub fn copy(&mut self, dest: &CellPath, src: &CellPath, types: &Types) -> Result<(), CellPath> {
+        if dest.region == Region::Rom {
+            return Err(dest.clone()); // the palette is read-only
+        }
+        let mut trial = self.clone();
+        trial[dest] = trial[src].clone();
+        if is_valid(&trial, types) {
+            *self = trial;
+            Ok(())
+        } else {
+            Err(dest.clone())
+        }
     }
-    // only eligible for cells within trees, as only they may be empty.
-    pub fn mova(&mut self, src: &CellPath, dest: &CellPath) {
-        self[dest] = mem::take(&mut self[src]);
+    /// Move `src` onto `dest`, leaving `Empty` behind at `src`. Applied only if
+    /// the result is well-formed; on rejection the document is unchanged and
+    /// the offending cell is returned. Only a tree cell may be moved - only it
+    /// may legally become `Empty` - and the palette is read-only.
+    pub fn mova(&mut self, src: &CellPath, dest: &CellPath, types: &Types) -> Result<(), CellPath> {
+        if src.region == Region::Rom || !ends_in_tree(src) {
+            return Err(src.clone());
+        }
+        if dest.region == Region::Rom || !ends_in_tree(dest) {
+            return Err(dest.clone());
+        }
+        let mut trial = self.clone();
+        trial[dest] = mem::take(&mut trial[src]);
+        if is_valid(&trial, types) {
+            *self = trial;
+            Ok(())
+        } else {
+            Err(dest.clone())
+        }
     }
     pub fn add_column_right(&mut self, cell: &CellPath) {
         self.add_column(cell, true);
@@ -270,6 +299,9 @@ impl Document {
         if y == 0 { return; }
         let parent = &mut self[&parent];
         if let Cell::Tree(Tree { contents, width, height }) = parent {
+            if row_has_field(contents, *width, y - 1) {
+                return; // a struct grid must keep all its field cells
+            }
             for _ in 0 .. *width {
                 contents.remove((y - 1) * *width);
             }
@@ -286,6 +318,9 @@ impl Document {
             if y == *height - 1 {
                 return;
             }
+            if row_has_field(contents, *width, y + 1) {
+                return; // a struct grid must keep all its field cells
+            }
             for _ in 0 .. *width {
                 contents.remove((y + 1) * *width);
             }
@@ -300,6 +335,9 @@ impl Document {
         if x == 0 { return; }
         let parent = &mut self[&parent];
         if let Cell::Tree(Tree { contents, width, height }) = parent {
+            if col_has_field(contents, *width, *height, x - 1) {
+                return; // a struct grid must keep all its field cells
+            }
             for i in (0 .. *height).map(|i| i * *width + x - 1).rev() {
                 contents.remove(i);
             }
@@ -314,6 +352,9 @@ impl Document {
         let parent = &mut self[&parent];
         if let Cell::Tree(Tree { contents, width, height }) = parent {
             if x == *width - 1 { return; }
+            if col_has_field(contents, *width, *height, x + 1) {
+                return; // a struct grid must keep all its field cells
+            }
             for i in (0 .. *height).map(|i| i * *width + x + 1).rev() {
                 contents.remove(i);
             }
@@ -373,4 +414,137 @@ impl IndexMut<(usize, usize)> for Tree {
     fn index_mut(&mut self, (x, y): (usize, usize)) -> &mut Self::Output {
         &mut self.contents[self.width * y + x]
     }
+}
+
+// ===========================================================================
+// Validity checking
+// ===========================================================================
+//
+// `copy` and `mova` apply their change to a trial clone of the document and
+// keep it only if the result is still well-formed. Encoding legality as "the
+// result is a valid document" covers every case uniformly: copying a field
+// cell loose into a free tree, copying a mistyped value into a field, moving a
+// field cell into a different struct's grid, overwriting a field cell - each
+// leaves the document invalid and so is rejected.
+
+/// Whether a path ends by stepping into a tree cell (so the cell may be `Empty`).
+fn ends_in_tree(path: &CellPath) -> bool {
+    matches!(path.path.last(), Some(PathStep::Tree(..)))
+}
+
+/// Whether row `r` of a `width`-wide grid contains a field cell.
+fn row_has_field(contents: &[Cell], width: usize, r: usize) -> bool {
+    (0..width).any(|x| matches!(contents[r * width + x], Cell::Field(_)))
+}
+
+/// Whether column `c` of a `width`-wide, `height`-tall grid contains a field cell.
+fn col_has_field(contents: &[Cell], width: usize, height: usize, c: usize) -> bool {
+    (0..height).any(|y| matches!(contents[y * width + c], Cell::Field(_)))
+}
+
+/// Whether the whole document is structurally well-formed and type-correct.
+pub fn is_valid(doc: &Document, types: &Types) -> bool {
+    valid_field_value(&doc.rim, &types.rim, types)
+        && valid_region_tree(&doc.ram, types)
+        && valid_region_tree(&doc.rom, types)
+}
+
+/// A region root: a tree of free (untyped) cells.
+fn valid_region_tree(cell: &Cell, types: &Types) -> bool {
+    match cell {
+        Cell::Tree(t) => valid_shape(t) && t.contents.iter().all(|c| valid_free_cell(c, types)),
+        _ => false,
+    }
+}
+
+/// A tree's `contents` length must match its declared dimensions.
+fn valid_shape(t: &Tree) -> bool {
+    t.contents.len() == t.width * t.height
+}
+
+/// A cell living directly in a free (untyped) tree - Ram, Rom, or a tree
+/// nested inside one. Anything is allowed except a loose `Field` cell, which
+/// may only ever live inside a struct's grid.
+fn valid_free_cell(cell: &Cell, types: &Types) -> bool {
+    match cell {
+        Cell::Empty | Cell::Symbol(_) => true,
+        Cell::Struct(sv) => valid_struct(sv, types),
+        Cell::Tree(t) => valid_shape(t) && t.contents.iter().all(|c| valid_free_cell(c, types)),
+        Cell::Field(_) => false,
+    }
+}
+
+/// The value held by a field, or by the Rim root, checked against its `FieldDef`.
+fn valid_field_value(cell: &Cell, def: &FieldDef, types: &Types) -> bool {
+    if def.is_tree {
+        match cell {
+            Cell::Tree(t) => {
+                valid_shape(t) && t.contents.iter().all(|c| valid_element(c, def.value, types))
+            }
+            _ => false,
+        }
+    } else {
+        valid_typed(cell, def.value, types)
+    }
+}
+
+/// An element of a typed tree: a blank cell, or a value of the element type.
+fn valid_element(cell: &Cell, value: CellValue, types: &Types) -> bool {
+    cell.is_empty() || valid_typed(cell, value, types)
+}
+
+/// A cell that must be exactly the given non-tree, non-empty value type.
+fn valid_typed(cell: &Cell, value: CellValue, types: &Types) -> bool {
+    match (cell, value) {
+        (Cell::Symbol(_), CellValue::Symbol) => true,
+        (Cell::Struct(sv), CellValue::Struct(id)) => sv.struct_id == id && valid_struct(sv, types),
+        _ => false,
+    }
+}
+
+/// A struct: ids in range, and its grid holds exactly one correctly-tagged
+/// `Field` cell per field of the variant (every other cell `Empty`), or is
+/// `None` for a fieldless variant.
+fn valid_struct(sv: &StructVal, types: &Types) -> bool {
+    let Some(def) = types.types.get(sv.struct_id) else {
+        return false;
+    };
+    let Some(variant) = def.variants.get(sv.variant_id) else {
+        return false;
+    };
+    let field_count = variant.fields.len();
+
+    let Some(grid) = &sv.grid else {
+        return field_count == 0; // a fieldless variant has no grid
+    };
+    let Cell::Tree(t) = grid.as_ref() else {
+        return false;
+    };
+    if field_count == 0 || !valid_shape(t) {
+        return false;
+    }
+
+    // every field 0..field_count must appear exactly once, as a correctly
+    // tagged Field cell; every other cell must be Empty
+    let mut seen = vec![false; field_count];
+    for c in &t.contents {
+        match c {
+            Cell::Empty => {}
+            Cell::Field(fv) => {
+                if fv.struct_id != sv.struct_id
+                    || fv.variant_id != sv.variant_id
+                    || fv.field_id >= field_count
+                    || seen[fv.field_id]
+                {
+                    return false;
+                }
+                seen[fv.field_id] = true;
+                if !valid_field_value(&fv.value, &variant.fields[fv.field_id], types) {
+                    return false;
+                }
+            }
+            _ => return false, // struct grids hold only Field/Empty cells
+        }
+    }
+    seen.into_iter().all(|s| s)
 }

@@ -1,2 +1,1 @@
-SystemTime { tv_sec: 1779194280, tv_nsec: 274091608 }
-Pair { x: "hello", y: "hi" }
+SystemTime { tv_sec: 1779217407, tv_nsec: 65436665 }
