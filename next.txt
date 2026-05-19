@@ -2,10 +2,3 @@
   - check "move" operator and "copy" operator
   - check delete_row/column does not remove field cells
 
-
-
-RESPONSE
-- I know that copy takes (dest, src) and mova takes (src, dest). that is to reflect
-  the selection order of the cells for the corresponding operations. for copy, you
-  select dest, then src. for move, src, then dest. this is an aesthetic preference
-  of the author.

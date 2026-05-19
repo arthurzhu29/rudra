@@ -35,7 +35,7 @@ use crate::document3::*;
 // ===========================================================================
 
 pub fn run() {
-    let types = sample_types();
+    let types = crate::custom::sample_types();
 
     // The Rim canvas starts as a tree of symbols, so the grid operations
     // (add/delete row/column) have something to act on from the first frame.
@@ -65,70 +65,6 @@ pub fn run() {
         .run();
 }
 
-/// A small sample schema so the MVP shows something interesting: one struct
-/// with a two-symbol variant (exercises variant cycling and field rendering)
-/// and one struct with a tree-typed field (exercises nested grids).
-fn sample_types() -> Types {
-    Types {
-        types: vec![
-            // struct 0: "Pair"
-            StructDef {
-                name: "Pair".to_string(),
-                variants: vec![
-                    // variant 1: two symbol fields
-                    VariantDef {
-                        name: "xy".to_string(),
-                        fields: vec![
-                            FieldDef { name: "x".to_string(), value: CellValue::Symbol, is_tree: false },
-                            FieldDef { name: "y".to_string(), value: CellValue::Symbol, is_tree: false },
-                        ],
-                    },
-                ],
-            },
-            // struct 1: "Box"
-            StructDef {
-                name: "Box".to_string(),
-                variants: vec![
-                    VariantDef {
-                        name: "grid".to_string(),
-                        fields: vec![FieldDef {
-                            name: "items".to_string(),
-                            value: CellValue::Symbol,
-                            is_tree: true,
-                        }],
-                    },
-                ],
-            },
-        ],
-        rim: FieldDef {
-            name: "canvas".to_string(),
-            value: CellValue::Struct(0),
-            is_tree: false,
-        },
-    }
-}
-pub const STATIC_BUILDER: StaticBuilder = StaticBuilder {
-    root: ", ",
-    data: &[
-        &[
-            (
-                &[
-                    ("Pair { x: \"", None),
-                    ("\", y: \"", None),
-                ],
-                "\" }",
-            ),
-        ],
-        &[
-            (
-                &[
-                    ("Box(\"", Some("")),
-                ],
-                "\")",
-            ),
-        ],
-    ],
-};
 
 pub struct StaticBuilder {
     pub root: &'static str,

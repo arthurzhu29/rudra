@@ -123,11 +123,11 @@ pub mod test {
         pub root: String,
         pub data: Vec<Vec<(Vec<(String, Option<String>)>, String)>>,
     }
-    use crate::ui::STATIC_BUILDER;
+    use crate::custom::STATIC_BUILDER;
     use crate::ui::StaticBuilder;
     use crate::serialization::*;
     pub fn test_serialize(document: &Document) {
-        fn build(pb: PrintingBuilder) -> Printing {
+        fn _build(pb: PrintingBuilder) -> Printing {
             let mut variant_offset_i = 0;
             let mut variant_data_offset_i = 0;
             let mut variant_offset = vec![];

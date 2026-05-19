@@ -117,7 +117,7 @@ impl Types {
     pub fn default_struct_variant(&self, struct_id: usize, variant_id: usize) -> Cell {
         Cell::Struct(StructVal {
             struct_id,
-            variant_id: 0,
+            variant_id,
             grid: {
                 let contents = self.types[struct_id].variants[variant_id].fields.iter().enumerate().map(|(field_id, fd)| Cell::Field(FieldVal { struct_id, variant_id, field_id, value: Box::new(fd.default(self)) })).collect::<Vec<_>>();
                 (!contents.is_empty()).then_some(
