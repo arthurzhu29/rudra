@@ -1,4 +1,0 @@
-- rom, ram and rim should be divided by vertical lines. they have their own scrollable space (x, y scrollable) and the root cell does not have
-  a fixed size; instead it can be as small as necessary.
-- the box edges should be round
-- the borders should be thicker.

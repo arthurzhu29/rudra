@@ -110,7 +110,7 @@ impl Document {
     }
     pub fn add_column(&mut self, cell: &CellLocation, is_right: bool) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(x, _) = parent.path.pop().unwrap() else {
             panic!();
         };
         let parent = self.resolve_mut(&parent);
@@ -123,13 +123,14 @@ impl Document {
     }
     pub fn add_row(&mut self, cell: &CellLocation, is_down: bool) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(_, y) = parent.path.pop().unwrap() else {
             panic!();
         };
         let parent = self.resolve_mut(&parent);
         if let Cell::Tree(Tree { contents, width, height }) = parent {
-            for _ in (0 .. *width) {
-                contents.insert(y * *width, Cell::Empty);
+            for _ in 0 .. *width {
+                contents.insert((y + is_down as usize) * *width, Cell::Empty);
+                // contents.insert(y * *width, Cell::Empty);
             }
             *height += 1;
         }
@@ -156,13 +157,13 @@ impl Document {
     }
     pub fn delete_row_above(&mut self, cell: &CellLocation) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(_, y) = parent.path.pop().unwrap() else {
             panic!();
         };
         if y == 0 { return; }
         let parent = self.resolve_mut(&parent);
         if let Cell::Tree(Tree { contents, width, height }) = parent {
-            for _ in (0 .. *width) {
+            for _ in 0 .. *width {
                 contents.remove((y - 1) * *width);
             }
             *height -= 1;
@@ -170,7 +171,7 @@ impl Document {
     }
     pub fn delete_row_below(&mut self, cell: &CellLocation) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(_, y) = parent.path.pop().unwrap() else {
             panic!();
         };
         let parent = self.resolve_mut(&parent);
@@ -178,7 +179,7 @@ impl Document {
             if y == *height - 1 {
                 return;
             }
-            for _ in (0 .. *width) {
+            for _ in 0 .. *width {
                 contents.remove((y + 1) * *width);
             }
             *height -= 1;
@@ -186,7 +187,7 @@ impl Document {
     }
     pub fn delete_column_left(&mut self, cell: &CellLocation) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(x, _) = parent.path.pop().unwrap() else {
             panic!();
         };
         if x == 0 { return; }
@@ -200,7 +201,7 @@ impl Document {
     }
     pub fn delete_column_right(&mut self, cell: &CellLocation) {
         let mut parent = cell.clone();
-        let PathStep::Tree(x, y) = parent.path.pop().unwrap() else {
+        let PathStep::Tree(x, _) = parent.path.pop().unwrap() else {
             panic!();
         };
         let parent = self.resolve_mut(&parent);

@@ -10,9 +10,23 @@
 //! Hovering is separate: per-cell `Over`/`Out` observers swap a cell's
 //! background to its hover colour and back, with `propagate(false)` keeping a
 //! hover confined to the innermost cell under the pointer.
+//!
+//! Each region has an independent pan and zoom held in the `Views` resource
+//! (so they survive a rebuild). Dragging inside a region pans it, the mouse
+//! wheel zooms it, and a per-region "Center" button fits the root cell to the
+//! viewport. Pan/zoom is a `UiTransform` on the region's content node and never
+//! triggers a rebuild.
+//!
+//! ---------------------------------------------------------------------------
+//! API NOTE. A few names below are best-effort against Bevy 0.18 and may need a
+//! local fix: `UiTransform` / `Val2::px`, the `Pointer<Drag>` `delta` accessor,
+//! `RelativeCursorPosition::mouse_over()`, and `ComputedNode::size()`.
+//! ---------------------------------------------------------------------------
 
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
+use bevy::ui::RelativeCursorPosition;
 
 use crate::document2::*;
 
@@ -37,10 +51,15 @@ pub fn run() {
         .insert_resource(Doc(document))
         .insert_resource(Schema(types))
         .init_resource::<Ui>()
+        .init_resource::<Views>()
         .insert_resource(Dirty(true)) // forces the first-frame build
         .add_systems(Startup, setup)
-        // typing edits run before the rebuild so an edit shows the same frame
-        .add_systems(Update, (symbol_typing, rebuild_view).chain())
+        // zoom feeds Views; rebuild respawns the view; apply_views then pushes
+        // the current pan/zoom onto the (possibly just-spawned) content nodes.
+        .add_systems(
+            Update,
+            (zoom_on_scroll, symbol_typing, rebuild_view, apply_views).chain(),
+        )
         .run();
 }
 
@@ -118,6 +137,47 @@ enum Mode {
     AwaitingCopySource { dest: CellLocation },
 }
 
+/// Independent pan/zoom for each of the three regions. Lives in a resource so
+/// it survives the whole-view rebuild (the spawned entities do not).
+#[derive(Resource, Default)]
+struct Views {
+    rom: ViewState,
+    ram: ViewState,
+    rim: ViewState,
+}
+
+/// One region's camera-like state: `pan` is a free screen-space offset of the
+/// content, `zoom` a scale factor. Panning is unbounded - the content may be
+/// dragged entirely outside the viewport, just like a pan camera.
+#[derive(Clone, Copy)]
+struct ViewState {
+    pan: Vec2,
+    zoom: f32,
+}
+
+impl Default for ViewState {
+    fn default() -> Self {
+        Self { pan: Vec2::ZERO, zoom: 1.0 }
+    }
+}
+
+impl Views {
+    fn get(&self, r: Region) -> ViewState {
+        match r {
+            Region::Rom => self.rom,
+            Region::Ram => self.ram,
+            Region::Rim => self.rim,
+        }
+    }
+    fn get_mut(&mut self, r: Region) -> &mut ViewState {
+        match r {
+            Region::Rom => &mut self.rom,
+            Region::Ram => &mut self.ram,
+            Region::Rim => &mut self.rim,
+        }
+    }
+}
+
 // ===========================================================================
 // Components - markers on the spawned view entities
 // ===========================================================================
@@ -135,12 +195,35 @@ struct CellTag(CellLocation);
 #[derive(Component)]
 struct ButtonTag(Action);
 
+/// A region's "Center" button carries the region it re-centres.
+#[derive(Component)]
+struct CenterButton(Region);
+
+/// The clipped viewport node of a region - catches drag (pan) and is the rect
+/// the mouse wheel (zoom) and "Center" are measured against.
+#[derive(Component)]
+struct RegionViewport(Region);
+
+/// The content node of a region - holds the cell tree and carries the
+/// `UiTransform` that `apply_views` drives from `Views`.
+#[derive(Component)]
+struct RegionContent(Region);
+
 /// An entity whose background swaps between two colours on pointer hover.
-/// Carried by every cell and every toolbar button. `rest` is the colour the
-/// view was built with (it already reflects selection state); `hover` is shown
-/// while the pointer is directly over the entity.
+/// Carried by every cell and every button. `rest` is the colour the view was
+/// built with (it already reflects selection state); `hover` is shown while
+/// the pointer is directly over the entity.
 #[derive(Component)]
 struct Hoverable {
+    rest: Color,
+    hover: Color,
+}
+
+/// Carried alongside `Hoverable` by cells (which have a border): the border
+/// colours to swap between on hover. Buttons omit it - they have no border to
+/// change - so the observers simply leave their borders alone.
+#[derive(Component)]
+struct HoverBorder {
     rest: Color,
     hover: Color,
 }
@@ -178,6 +261,7 @@ fn rebuild_view(
     doc: Res<Doc>,
     schema: Res<Schema>,
     ui: Res<Ui>,
+    views: Res<Views>,
 ) {
     if !dirty.0 {
         return;
@@ -189,10 +273,10 @@ fn rebuild_view(
         commands.entity(e).despawn();
     }
 
-    build_view(&mut commands, &doc.0, &schema.0, &ui);
+    build_view(&mut commands, &doc.0, &schema.0, &ui, &views);
 }
 
-fn build_view(commands: &mut Commands, doc: &Document, types: &Types, ui: &Ui) {
+fn build_view(commands: &mut Commands, doc: &Document, types: &Types, ui: &Ui, views: &Views) {
     commands
         .spawn((
             ViewRoot,
@@ -205,15 +289,151 @@ fn build_view(commands: &mut Commands, doc: &Document, types: &Types, ui: &Ui) {
             BackgroundColor(APP_BG),
         ))
         .with_children(|root| {
-            // top to bottom: toolbar, status line, then the regions fill the rest
-            crate::spawn_section::spawn_columns(
-                root,
-                |cs| spawn_region(cs, Region::Rom, doc, types, ui),
-                |cs| spawn_region(cs, Region::Ram, doc, types, ui),
-                |cs| spawn_region(cs, Region::Rim, doc, types, ui),
-            );
+            // the three region columns fill the space above the toolbar/status
+            root.spawn(Node {
+                width: Val::Percent(100.0),
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Row,
+                ..default()
+            })
+            .with_children(|row| {
+                for (i, region) in [Region::Rom, Region::Ram, Region::Rim].into_iter().enumerate()
+                {
+                    if i > 0 {
+                        spawn_divider(row);
+                    }
+                    spawn_region(row, region, doc, types, ui, views.get(region));
+                }
+            });
+
             spawn_toolbar(root);
             spawn_status(root, ui);
+        });
+}
+
+/// A thin fixed-width divider between two region columns.
+fn spawn_divider(parent: &mut ChildSpawnerCommands) {
+    parent.spawn((
+        Node {
+            width: Val::Px(DIVIDER_WIDTH),
+            height: Val::Percent(100.0),
+            flex_shrink: 0.0, // always exactly DIVIDER_WIDTH wide
+            ..default()
+        },
+        BackgroundColor(DIVIDER_COLOR),
+    ));
+}
+
+/// One region column: a fixed header (name + Center button) above a clipped,
+/// pannable/zoomable viewport. The three columns are kept exactly equal width
+/// by `flex_basis: 0` + equal `flex_grow` + `min_width: 0`.
+fn spawn_region(
+    parent: &mut ChildSpawnerCommands,
+    region: Region,
+    doc: &Document,
+    types: &Types,
+    ui: &Ui,
+    view: ViewState,
+) {
+    parent
+        .spawn((
+            Node {
+                height: Val::Percent(100.0),
+                flex_basis: Val::Px(0.0), // ignore content size when sharing width
+                flex_grow: 1.0,           // ...so the three columns split evenly
+                min_width: Val::Px(0.0),  // allow shrinking below content width
+                flex_direction: FlexDirection::Column,
+                overflow: Overflow::clip(),
+                ..default()
+            },
+            BackgroundColor(SECTION_BG),
+        ))
+        .with_children(|section| {
+            spawn_region_header(section, region);
+
+            // the viewport: clips the content, and catches drags to pan
+            section
+                .spawn((
+                    RegionViewport(region),
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_grow: 1.0,
+                        overflow: Overflow::clip(),
+                        ..default()
+                    },
+                    // lets `zoom_on_scroll` ask "is the cursor over this region?"
+                    RelativeCursorPosition::default(),
+                ))
+                .observe(on_viewport_drag)
+                .with_children(|viewport| {
+                    // the content node: holds the cell tree and is transformed
+                    // (pan + zoom) by `apply_views`. Absolutely positioned so
+                    // its size shrink-wraps the tree and the transform origin
+                    // is the viewport's top-left.
+                    viewport
+                        .spawn((
+                            RegionContent(region),
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(0.0),
+                                top: Val::Px(0.0),
+                                ..default()
+                            },
+                            UiTransform {
+                                translation: Val2::px(view.pan.x, view.pan.y),
+                                scale: Vec2::splat(view.zoom),
+                                ..default()
+                            },
+                        ))
+                        .with_children(|content| {
+                            let root_loc = CellLocation { region, path: vec![] };
+                            spawn_cell(content, doc.root(region), &root_loc, types, ui);
+                        });
+                });
+        });
+}
+
+fn spawn_region_header(section: &mut ChildSpawnerCommands, region: Region) {
+    section
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::SpaceBetween,
+                column_gap: Val::Px(8.0),
+                padding: UiRect::all(Val::Px(6.0)),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+        ))
+        .with_children(|header| {
+            header.spawn((
+                Text::new(region_name(region)),
+                TextFont { font_size: 14.0, ..default() },
+                TextColor(region_color(region)),
+            ));
+            header
+                .spawn((
+                    CenterButton(region),
+                    Node {
+                        padding: UiRect::axes(Val::Px(8.0), Val::Px(3.0)),
+                        flex_shrink: 0.0,
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG),
+                    Hoverable { rest: BUTTON_BG, hover: lighten(BUTTON_BG, 0.22) },
+                ))
+                .with_children(|b| {
+                    b.spawn((
+                        Text::new("Center"),
+                        TextFont { font_size: 12.0, ..default() },
+                        TextColor(TEXT_FG),
+                    ));
+                })
+                .observe(on_center_click)
+                .observe(observe_over)
+                .observe(observe_out);
         });
 }
 
@@ -283,29 +503,6 @@ fn spawn_status(root: &mut ChildSpawnerCommands, ui: &Ui) {
     });
 }
 
-fn spawn_region(
-    parent: &mut ChildSpawnerCommands,
-    region: Region,
-    doc: &Document,
-    types: &Types,
-    ui: &Ui,
-) {
-    parent
-        .spawn(Node {
-            flex_direction: FlexDirection::Column,
-            width: Val::Percent(100.0),
-            row_gap: Val::Px(6.0),
-            padding: UiRect::all(Val::Px(8.0)),
-            align_items: AlignItems::Start,
-            ..default()
-        })
-        .with_children(|col| {
-            // each region is one root Cell, rendered recursively
-            let root_loc = CellLocation { region, path: vec![] };
-            spawn_cell(col, doc.root(region), &root_loc, types, ui);
-        });
-}
-
 // ===========================================================================
 // The recursive cell renderer - the heart of the view
 // ===========================================================================
@@ -323,8 +520,9 @@ fn spawn_cell(
     let base = (
         CellTag(loc.clone()),
         BackgroundColor(v.rest_bg),
-        BorderColor::all(v.border),
+        BorderColor::all(v.rest_border),
         Hoverable { rest: v.rest_bg, hover: v.hover_bg },
+        HoverBorder { rest: v.rest_border, hover: v.hover_border },
     );
 
     match cell {
@@ -338,6 +536,7 @@ fn spawn_cell(
                         min_width: Val::Px(44.0),
                         min_height: Val::Px(28.0),
                         border: UiRect::all(Val::Px(CELL_BORDER)),
+                        border_radius: BorderRadius::all(px(CELL_BORDER)),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         ..default()
@@ -364,6 +563,7 @@ fn spawn_cell(
                         min_width: Val::Px(44.0),
                         min_height: Val::Px(28.0),
                         border: UiRect::all(Val::Px(CELL_BORDER)),
+                        border_radius: BorderRadius::all(px(CELL_BORDER)),
                         ..default()
                     },
                 ))
@@ -381,6 +581,7 @@ fn spawn_cell(
                     Node {
                         flex_direction: FlexDirection::Column,
                         border: UiRect::all(Val::Px(CELL_BORDER)),
+                        border_radius: BorderRadius::all(px(CELL_BORDER)),
                         ..default()
                     },
                 ))
@@ -408,6 +609,7 @@ fn spawn_cell(
                     Node {
                         flex_direction: FlexDirection::Column,
                         border: UiRect::all(Val::Px(CELL_BORDER)),
+                        border_radius: BorderRadius::all(px(CELL_BORDER)),
                         ..default()
                     },
                 ))
@@ -416,7 +618,6 @@ fn spawn_cell(
                     for y in 0..t.height {
                         grid.spawn(Node {
                             flex_direction: FlexDirection::Row,
-                            column_gap: Val::Px(2.0),
                             ..default()
                         })
                         .with_children(|row| {
@@ -443,18 +644,96 @@ fn spawn_cell(
 // pointer: without it the same `Over` would bubble up the parent chain and
 // every enclosing cell would light up at once.
 
-fn observe_over(mut over: On<Pointer<Over>>, mut q: Query<(&Hoverable, &mut BackgroundColor)>) {
+fn observe_over(
+    mut over: On<Pointer<Over>>,
+    mut q: Query<(
+        &Hoverable,
+        &mut BackgroundColor,
+        Option<&HoverBorder>,
+        Option<&mut BorderColor>,
+    )>,
+) {
     over.propagate(false);
-    if let Ok((h, mut bg)) = q.get_mut(over.entity) {
+    if let Ok((h, mut bg, hover_border, border)) = q.get_mut(over.entity) {
         *bg = BackgroundColor(h.hover);
+        // cells carry both HoverBorder and BorderColor; buttons carry neither
+        if let (Some(hb), Some(mut border)) = (hover_border, border) {
+            *border = BorderColor::all(hb.hover);
+        }
     }
 }
 
-fn observe_out(mut out: On<Pointer<Out>>, mut q: Query<(&Hoverable, &mut BackgroundColor)>) {
+fn observe_out(
+    mut out: On<Pointer<Out>>,
+    mut q: Query<(
+        &Hoverable,
+        &mut BackgroundColor,
+        Option<&HoverBorder>,
+        Option<&mut BorderColor>,
+    )>,
+) {
     out.propagate(false);
-    if let Ok((h, mut bg)) = q.get_mut(out.entity) {
-        // back to the resting colour - which already reflects selection state
+    if let Ok((h, mut bg, hover_border, border)) = q.get_mut(out.entity) {
+        // back to the resting colours - which already reflect selection state
         *bg = BackgroundColor(h.rest);
+        if let (Some(hb), Some(mut border)) = (hover_border, border) {
+            *border = BorderColor::all(hb.rest);
+        }
+    }
+}
+
+// ===========================================================================
+// Pan / zoom
+// ===========================================================================
+//
+// Each region's content node carries a `UiTransform`. `Views` is the source of
+// truth for pan/zoom; `apply_views` copies it onto the transforms every frame
+// (and so also re-applies it to the content node a rebuild just respawned).
+// None of this sets `Dirty` - pan/zoom never rebuilds the view.
+
+/// Dragging anywhere inside a region's viewport pans that region. The drag
+/// bubbles up from whatever cell it started on to the viewport, which owns this
+/// observer - so a drag-on-a-cell pans, while a plain click still selects.
+fn on_viewport_drag(
+    mut drag: On<Pointer<Drag>>,
+    viewports: Query<&RegionViewport>,
+    mut views: ResMut<Views>,
+) {
+    drag.propagate(false);
+    let Ok(&RegionViewport(region)) = viewports.get(drag.entity) else {
+        return;
+    };
+    // `delta` is screen-space movement since the last drag event; pan is also
+    // screen-space, so this is a direct add. Unbounded - pan as far as you like.
+    views.get_mut(region).pan += drag.delta;
+}
+
+/// The mouse wheel zooms whichever region the cursor is over.
+fn zoom_on_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    viewports: Query<(&RegionViewport, &RelativeCursorPosition)>,
+    mut views: ResMut<Views>,
+) {
+    let dy: f32 = wheel.read().map(|e| e.y).sum();
+    if dy == 0.0 {
+        return;
+    }
+    for (&RegionViewport(region), cursor) in &viewports {
+        if cursor.cursor_over() {
+            let v = views.get_mut(region);
+            v.zoom = (v.zoom * ZOOM_STEP.powf(dy)).clamp(ZOOM_MIN, ZOOM_MAX);
+        }
+    }
+}
+
+/// Push the current pan/zoom from `Views` onto each region's content node.
+/// Cheap (three entities) and idempotent; runs every frame so drag/scroll show
+/// immediately and a just-rebuilt content node is corrected the same frame.
+fn apply_views(views: Res<Views>, mut contents: Query<(&RegionContent, &mut UiTransform)>) {
+    for (&RegionContent(region), mut transform) in &mut contents {
+        let v = views.get(region);
+        transform.translation = Val2::px(v.pan.x, v.pan.y);
+        transform.scale = Vec2::splat(v.zoom);
     }
 }
 
@@ -575,6 +854,44 @@ fn on_button_click(
     }
 }
 
+/// A region's "Center" button: fit the root cell to the viewport - centred,
+/// fully visible, zoomed as large as possible with at least one dimension
+/// touching the viewport edge.
+fn on_center_click(
+    click: On<Pointer<Click>>,
+    buttons: Query<&CenterButton>,
+    viewports: Query<(&RegionViewport, &ComputedNode)>,
+    contents: Query<(&RegionContent, &ComputedNode)>,
+    mut views: ResMut<Views>,
+) {
+    let Ok(&CenterButton(region)) = buttons.get(click.entity) else {
+        return;
+    };
+
+    // the viewport's size, and the content's *natural* (unscaled) size -
+    // `ComputedNode` is the layout result and is unaffected by `UiTransform`
+    let Some((_, vp)) = viewports.iter().find(|(v, _)| v.0 == region) else {
+        return;
+    };
+    let Some((_, ct)) = contents.iter().find(|(c, _)| c.0 == region) else {
+        return;
+    };
+    let viewport = vp.size();
+    let content = ct.size();
+    if content.x <= 0.0 || content.y <= 0.0 {
+        return; // nothing laid out yet
+    }
+
+    // largest zoom that still fits the whole root cell
+    let zoom = (viewport.x / content.x).min(viewport.y / content.y);
+    // ...then offset so the scaled content sits centred in the viewport.
+    // (Assumes `UiTransform` scales about the node centre - if it scales about
+    // the top-left instead, use `(viewport - content * zoom) * 0.5`.)
+    let pan = (viewport - content) * 0.5;
+
+    *views.get_mut(region) = ViewState { pan, zoom };
+}
+
 // ===========================================================================
 // Keyboard: typing edits the focused symbol cell
 // ===========================================================================
@@ -629,7 +946,9 @@ fn symbol_typing(
 // app chrome
 const APP_BG: Color = Color::srgb(0.09, 0.09, 0.11);
 const PANEL_BG: Color = Color::srgb(0.13, 0.13, 0.16);
+const SECTION_BG: Color = Color::srgb(0.12, 0.12, 0.15);
 const BUTTON_BG: Color = Color::srgb(0.22, 0.22, 0.28);
+const DIVIDER_COLOR: Color = Color::srgb(0.22, 0.22, 0.26);
 
 // text
 const TEXT_FG: Color = Color::srgb(0.92, 0.92, 0.94);
@@ -656,16 +975,24 @@ const COPY_DEST_BORDER: Color = Color::srgb(1.00, 0.66, 0.26);
 
 /// Cell border thickness, in px.
 const CELL_BORDER: f32 = 5.0;
+/// Width of the divider between region columns, in px.
+const DIVIDER_WIDTH: f32 = 2.0;
+
+// zoom limits and per-wheel-notch step
+const ZOOM_STEP: f32 = 1.12;
+const ZOOM_MIN: f32 = 0.1;
+const ZOOM_MAX: f32 = 8.0;
 
 // ===========================================================================
 // Visuals
 // ===========================================================================
 
-/// The three colours a cell is drawn with.
+/// The colours a cell is drawn with, at rest and on hover.
 struct CellVisual {
     rest_bg: Color,
     hover_bg: Color,
-    border: Color,
+    rest_border: Color,
+    hover_border: Color,
 }
 
 /// Resolve a cell's colours from its type and the current selection state.
@@ -675,7 +1002,7 @@ fn cell_visual(loc: &CellLocation, ui: &Ui, cell: &Cell) -> CellVisual {
     let is_copy_dest = matches!(&ui.mode, Mode::AwaitingCopySource { dest } if dest == loc);
     let is_focused = ui.focused.as_ref() == Some(loc);
 
-    let (rest_bg, border) = if is_copy_dest {
+    let (rest_bg, rest_border) = if is_copy_dest {
         (COPY_DEST_BG, COPY_DEST_BORDER)
     } else if is_focused {
         (FOCUS_BG, FOCUS_BORDER)
@@ -683,7 +1010,13 @@ fn cell_visual(loc: &CellLocation, ui: &Ui, cell: &Cell) -> CellVisual {
         (type_bg(cell), type_border(cell))
     };
 
-    CellVisual { rest_bg, hover_bg: lighten(rest_bg, 0.18), border }
+    CellVisual {
+        rest_bg,
+        hover_bg: lighten(rest_bg, 0.18),
+        rest_border,
+        // a brighter lift on the border than the fill, so the edge reads clearly
+        hover_border: lighten(rest_border, 0.30),
+    }
 }
 
 fn type_bg(cell: &Cell) -> Color {
@@ -762,8 +1095,8 @@ fn region_color(r: Region) -> Color {
 fn status_text(ui: &Ui) -> String {
     match &ui.mode {
         Mode::Normal => {
-            "Click a cell to select it. The toolbar acts on the selection; \
-             typing edits a selected symbol."
+            "Click a cell to select it. Drag a region to pan, scroll to zoom. \
+             The toolbar acts on the selection; typing edits a selected symbol."
                 .to_string()
         }
         Mode::AwaitingCopySource { .. } => {
