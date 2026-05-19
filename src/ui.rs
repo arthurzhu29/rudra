@@ -60,6 +60,8 @@ pub fn run() {
             Update,
             (zoom_on_scroll, symbol_typing, rebuild_view, apply_views).chain(),
         )
+        .add_systems(Update, save.run_if(
+    bevy::time::common_conditions::on_timer(std::time::Duration::from_secs(5))))
         .run();
 }
 
@@ -97,6 +99,37 @@ fn sample_types() -> Types {
             ],
         },
     ])
+}
+pub const STATIC_BUILDER: StaticBuilder = StaticBuilder {
+    root: ", ",
+    data: &[
+        &[
+            (
+                &[
+                    ("Pair { x: \"", None),
+                    ("\", y: \"", None),
+                ],
+                "\" }",
+            ),
+        ],
+        &[
+            (
+                &[
+                    ("Box(\"", Some("")),
+                ],
+                "\")",
+            ),
+        ],
+    ],
+};
+
+pub struct StaticBuilder {
+    pub root: &'static str,
+    pub data: &'static[&'static[(&'static[(&'static str, Option<&'static str>)], &'static str)]],
+}
+
+pub fn save(document: Res<Doc>) {
+    crate::serialization::test::test_serialize(&document.0);
 }
 
 // ===========================================================================

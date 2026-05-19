@@ -102,8 +102,11 @@ impl FieldDef {
 }
 
 impl Cell {
-    fn symbol() -> Self {
+    pub fn symbol() -> Self {
         Self::Symbol(String::new())
+    }
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Cell::Empty)
     }
 }
 
