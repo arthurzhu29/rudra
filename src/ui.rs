@@ -332,7 +332,7 @@ fn spawn_region(
                 flex_grow: 1.0,           // ...so the three columns split evenly
                 min_width: Val::Px(0.0),  // allow shrinking below content width
                 flex_direction: FlexDirection::Column,
-                overflow: Overflow::clip(),
+                overflow: Overflow::visible(),
                 ..default()
             },
             BackgroundColor(SECTION_BG),
@@ -347,7 +347,7 @@ fn spawn_region(
                     Node {
                         width: Val::Percent(100.0),
                         flex_grow: 1.0,
-                        overflow: Overflow::clip(),
+                        overflow: Overflow::visible(),
                         ..default()
                     },
                     // lets `zoom_on_scroll` ask "is the cursor over this region?"
