@@ -9,22 +9,6 @@ use crate::ui::*;
 // 3: pair: value, value
 // 4: [helper]: '.' value
 
-#[allow(unused)]
-macro_rules! structo {
-    ($name:expr $(, ($name2:expr $(, $field:expr)* $(,)?))* $(,)?) => {
-        StructDef {
-            name: $name.to_string(),
-            variants: vec![$(
-                VariantDef {
-                    name: $name2.to_string(),
-                    fields: vec![$($field.into(), )*],
-                },
-            )*],
-        }
-    };
-}
-
-#[allow(unused)]
 macro_rules! types {
     (
         $(
