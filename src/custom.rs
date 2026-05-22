@@ -11,36 +11,25 @@ use crate::ui::*;
 
 macro_rules! types {
     (
-        $(
-            $name:expr => {
-                $(
-                    $(;)?
-                    $(
-                        $variant:expr => (
-                            $($($field:expr),+ $(,)?)?
-                        )
-                    );+
-                )?
-            }
-        );* $(;)?
+        $($name:expr => {$(
+            $(;)?
+            $($variant:expr => (
+                $($($field:expr),+ $(,)?)?
+            ));+
+        )?});*
+        $(;)?
     ) => {
-        vec![
-            $(
-                StructDef {
-                    name: $name.to_string(),
-                    variants: vec![
-                        $($(
-                            VariantDef {
-                                name: $variant.to_string(),
-                                fields: vec![
-                                    $($($field.into(),)+)?
-                                ],
-                            },
-                        )+)?
-                    ],
-                },
-            )*
-        ]
+        vec![$(
+            StructDef {
+                name: $name.to_string(),
+                variants: vec![$($(
+                    VariantDef {
+                        name: $variant.to_string(),
+                        fields: vec![$($($field.into(), )+)?],
+                    },
+                )+)?],
+            },
+        )*]
     };
 }
 
